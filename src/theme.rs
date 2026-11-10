@@ -384,6 +384,8 @@ pub struct Theme {
     pub on_primary: Rgba,
     pub text: Rgba,
     pub subtext: Rgba,
+    /// Text that matters less: the weekends of the calendar.
+    pub overlay: Rgba,
     pub surface: Rgba,
     pub base: Rgba,
     pub font: String,
@@ -394,6 +396,10 @@ pub struct Theme {
     pub pill_border: f32,
     pub pill_padding: f32,
     pub item_gap: f32,
+    pub popup_radius: f32,
+    pub popup_border: f32,
+    /// The corners of what can be clicked in a popup: a button, a row.
+    pub row_radius: f32,
     pub animations: bool,
     /// The palette follows Windows: read again when light/dark or the accent change.
     pub follows_windows: bool,
@@ -428,6 +434,7 @@ impl Theme {
             on_primary: get("on_primary", "crust"),
             text: get("text", "text"),
             subtext: get("subtext", "subtext0"),
+            overlay: get("overlay", "overlay0"),
             surface: get("surface", "surface0"),
             base: get("base", "base"),
             palette: HashMap::new(),
@@ -439,6 +446,9 @@ impl Theme {
             pill_border: c.pill_border,
             pill_padding: c.pill_padding,
             item_gap: c.item_gap,
+            popup_radius: c.popup_radius,
+            popup_border: c.popup_border,
+            row_radius: c.row_radius,
             animations: c.animations,
             follows_windows,
         };

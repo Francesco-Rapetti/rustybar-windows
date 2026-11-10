@@ -20,8 +20,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect,
-    HWND_TOPMOST, MA_NOACTIVATE, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowPos, ShowWindow,
-    WM_APP, WM_DPICHANGED, WM_MOUSEACTIVATE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    HWND_TOPMOST, IDC_ARROW, LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SetWindowPos, ShowWindow, WM_APP, WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Result, w};
@@ -102,6 +102,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         // A click on the bar leaves the window in front where it is
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_LBUTTONDOWN => {
+            push(Event::Click { hwnd, x: (lparam.0 & 0xffff) as i16 as i32 });
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -114,6 +118,7 @@ fn register_class() {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             lpszClassName: CLASS,
             ..Default::default()
         };
@@ -394,6 +399,22 @@ impl Bar {
             }
         }
         Ok(())
+    }
+
+    /// The pill under `x` (client pixels), by its widget's name. The bar's whole height counts,
+    /// up to the screen's edge, where the mouse stops by itself.
+    pub fn pill_at(&self, x: i32) -> Option<String> {
+        let x = x as f32;
+        self.pills.iter().find(|(_, pv)| x >= pv.x && x < pv.x + pv.size.0 as f32).map(|(key, _)| key.clone())
+    }
+
+    /// A pill's left and right edges, and the bar's bottom, in screen pixels.
+    pub fn pill_span(&self, key: &str) -> Option<(i32, i32, i32)> {
+        let pv = self.pills.get(key)?;
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(self.hwnd, &mut r).ok()? };
+        let left = r.left + pv.x as i32;
+        Some((left, left + pv.size.0 as i32, r.bottom))
     }
 
     fn unregister(&mut self) {

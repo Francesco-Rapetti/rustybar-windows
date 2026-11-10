@@ -8,9 +8,9 @@ mod app;
 mod bar;
 mod config;
 mod gfx;
-#[allow(dead_code)] // The popups will use it
 mod i18n;
 mod log;
+mod popup;
 mod process;
 mod theme;
 mod ui;

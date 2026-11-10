@@ -28,11 +28,13 @@ pub struct BarConfig {
     /// Off: the bar doesn't reserve its strip of the screen (windows go under it). For trying a
     /// second bar next to the real one.
     pub reserve: bool,
+    /// From the bottom of the bar to the top of a popup, in DIPs.
+    pub popup_gap: f32,
 }
 
 impl Default for BarConfig {
     fn default() -> Self {
-        BarConfig { height: 40.0, margin: 8.0, reserve: true }
+        BarConfig { height: 40.0, margin: 8.0, reserve: true, popup_gap: 6.0 }
     }
 }
 
@@ -50,6 +52,9 @@ pub struct ThemeConfig {
     pub pill_border: f32,
     pub pill_padding: f32,
     pub item_gap: f32,
+    pub popup_radius: f32,
+    pub popup_border: f32,
+    pub row_radius: f32,
     pub animations: bool,
     /// Palette colors to override or add, by name or hex.
     pub colors: HashMap<String, String>,
@@ -68,6 +73,10 @@ impl Default for ThemeConfig {
             pill_border: 1.0,
             pill_padding: 10.0,
             item_gap: 8.0,
+            // Windows 11's: flyouts round their corners by 8, buttons and rows by 4
+            popup_radius: 8.0,
+            popup_border: 1.0,
+            row_radius: 4.0,
             animations: true,
             colors: HashMap::new(),
         }

@@ -6,14 +6,16 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, WPARAM};
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+use windows::Win32::System::Memory::{HeapOptimizeResources, HeapSetInformation};
 use windows::Win32::System::Threading::{
     BELOW_NORMAL_PRIORITY_CLASS, CreateMutexW, GetCurrentProcess, MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_LOW,
     PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
     ProcessMemoryPriority, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
 };
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
-use windows::core::HSTRING;
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow, FindWindowW, PostMessageW, SW_SHOWNORMAL, WM_CLOSE};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::log;
 
@@ -79,6 +81,38 @@ pub fn quit_running() {
     unsafe {
         if let Ok(hwnd) = FindWindowW(CONTROL_CLASS, &instance_title()) {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Gives back to Windows the pages the heaps keep after a free (what a popup used, gone with
+/// it): every heap of the process trims its caches and decommits what it can. Without this they
+/// would count as the bar's memory until something reused them.
+pub fn release_memory() {
+    // HEAP_OPTIMIZE_RESOURCES_INFORMATION, which the `windows` crate doesn't have
+    #[repr(C)]
+    struct Optimize {
+        version: u32,
+        flags: u32,
+    }
+    let info = Optimize { version: 1, flags: 0 };
+    unsafe {
+        if let Err(e) = HeapSetInformation(None, HeapOptimizeResources, Some(&info as *const _ as *const c_void), size_of::<Optimize>()) {
+            log!("release memory: {e}");
+        }
+    }
+}
+
+/// Opens a URL (a page, a `scheme:` link) as a click in Explorer would: with the app Windows has
+/// for it, which may then come in front.
+pub fn open(target: &str) {
+    unsafe {
+        // The app that opens it is another process: it may take the front from this one
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        let result = ShellExecuteW(None, w!("open"), &HSTRING::from(target), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        // Above 32 is success
+        if result.0 as isize <= 32 {
+            log!("can't open {target}: error {}", result.0 as isize);
         }
     }
 }

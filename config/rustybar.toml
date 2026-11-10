@@ -5,6 +5,7 @@
 height = 40          # the bar, in DIPs; the pills are centered in it
 margin = 8           # from the screen edges to the first and last pill
 reserve = true       # reserve the strip, as the taskbar does: maximized windows stop under it
+popup_gap = 6        # from the bottom of the bar to a popup
 
 [theme]
 # The palette. windows: light or dark and the accent color of Windows, followed as they change.
@@ -23,7 +24,10 @@ pill_radius = 14
 pill_border = 1
 pill_padding = 10
 item_gap = 8                     # between pills
-animations = true                # also off when Windows has animations off
+popup_radius = 8                 # the corners of a popup, as Windows 11's flyouts
+popup_border = 1
+row_radius = 4                   # the corners of what can be clicked in a popup
+animations = true                # also off when Windows has animations off, or a game is in front
 
 # Override or add palette colors, by name or hex:
 # [theme.colors]
@@ -43,6 +47,8 @@ apps = []                        # e.g. ["wow.exe", "cs2.exe"]
 #
 # [widgets.clock]
 # date = "ddd dd/MM"             # a Windows date picture; "" for the time alone
+# # The page a click on a day of the calendar opens; "" for days that can't be clicked
+# open = "https://calendar.google.com/calendar/r/day/{year}/{month}/{day}"
 #
 # [widgets.workspaces]
 # single = false                 # show the pill with a single desktop too

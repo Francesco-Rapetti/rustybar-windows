@@ -2,7 +2,9 @@
 //! sleeps in `MsgWaitForMultipleObjectsEx` until something happens: a window message (the shell,
 //! Windows' broadcasts), the foreground hook, a widget's handle (the clock's timer, the registry)
 //! or the config file. Window procedures and the hook only queue an `Event`; the loop handles the
-//! queue after dispatching, so nothing re-enters the app while it works.
+//! queue after dispatching, so nothing re-enters the app while it works. A click on a pill opens
+//! its widget's popup (`popup.rs`), one at a time, closed by a click anywhere else, Esc or the
+//! pill again.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -19,14 +21,16 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Shell::{ABN_FULLSCREENAPP, ABN_POSCHANGED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, MSG,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, IsWindow, MSG,
     MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PM_REMOVE, PeekMessageW,
     PostQuitMessage, QS_ALLINPUT, RegisterClassExW, RegisterWindowMessageW, SPI_GETCLIENTAREAANIMATION,
-    SPI_SETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_DISPLAYCHANGE, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION,
-    WM_POWERBROADCAST, WM_QUIT, WM_SETTINGCHANGE, WM_TIMECHANGE, WNDCLASSEXW, WS_POPUP,
+    SPI_SETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SystemParametersInfoW,
+    TranslateMessage, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_DISPLAYCHANGE,
+    WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_POWERBROADCAST, WM_QUIT, WM_SETTINGCHANGE, WM_TIMECHANGE, WNDCLASSEXW,
+    WS_POPUP,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, Result, w};
 
@@ -34,16 +38,27 @@ use crate::bar::{self, Bar, Sides};
 use crate::config::{self, Config, Options};
 use crate::gfx::Gfx;
 use crate::log;
+use crate::popup::{Anchor, Popup, Side};
 use crate::process;
 use crate::theme::Theme;
 use crate::ui::{Measured, Text};
 use crate::widgets::front_app::{self, Foreground, Names};
-use crate::widgets::{self, Signal, Widget};
+use crate::widgets::{self, Input, Reply, Signal, Widget};
 
 /// What window procedures and the hook queue for the loop.
 pub enum Event {
     AppBar { hwnd: HWND, code: u32, on: bool },
     Dpi { hwnd: HWND, dpi: u32 },
+    /// A click on a bar, `x` pixels from its left edge.
+    Click { hwnd: HWND, x: i32 },
+    /// The popup isn't in front anymore: the user clicked somewhere else.
+    PopupInactive(HWND),
+    /// The mouse over the popup, in client pixels (None: it left), and whether it clicked.
+    PopupMouse { hwnd: HWND, at: Option<(i32, i32)>, click: bool },
+    PopupWheel { hwnd: HWND, delta: i32 },
+    PopupKey { hwnd: HWND, key: u16 },
+    /// A closed popup finished fading out.
+    PopupGone(HWND),
     Foreground(HWND),
     Displays,
     ShellRestarted,
@@ -79,7 +94,11 @@ pub struct App {
     theme: Theme,
     text: Text,
     widgets: Vec<Slot>,
-    // The bars go before the devices they draw with
+    // The popups and the bars go before the devices they draw with
+    /// The open popup, if any.
+    popup: Option<Popup>,
+    /// Closed popups still fading out.
+    closing: Vec<Popup>,
     bars: Vec<Bar>,
     gfx: Option<Gfx>,
     control: HWND,
@@ -91,6 +110,8 @@ pub struct App {
     game_in_front: bool,
     system_animations: bool,
     dirty: bool,
+    /// The open popup's scene is to make again (and to draw, if it changed).
+    popup_dirty: bool,
     failures: u32,
     started: Instant,
     first_frame: bool,
@@ -141,6 +162,8 @@ impl App {
             config,
             theme,
             text,
+            popup: None,
+            closing: Vec::new(),
             bars: Vec::new(),
             gfx: None,
             control,
@@ -152,6 +175,7 @@ impl App {
             game_in_front: false,
             system_animations: system_animations(),
             dirty: true,
+            popup_dirty: false,
             failures: 0,
             started,
             first_frame: false,
@@ -187,7 +211,7 @@ impl App {
                     None => self.config_changed(),
                     Some(i) => {
                         if self.widgets[i].widget.signaled() {
-                            self.dirty = true;
+                            self.changed(i);
                         }
                     }
                 }
@@ -210,6 +234,34 @@ impl App {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::Click { hwnd, x } => self.click(hwnd, x),
+            Event::PopupInactive(hwnd) => {
+                if self.popup.as_ref().is_some_and(|p| p.hwnd == hwnd) {
+                    self.close_popup(false);
+                }
+            }
+            Event::PopupMouse { hwnd, at, click } => self.popup_mouse(hwnd, at, click),
+            Event::PopupWheel { hwnd, delta } => {
+                if let Some(popup) = self.popup.as_mut().filter(|p| p.hwnd == hwnd) {
+                    let notches = popup.wheel(delta);
+                    if notches != 0 {
+                        self.popup_input(&Input::Wheel(notches));
+                    }
+                }
+            }
+            Event::PopupKey { hwnd, key } => {
+                if self.popup.as_ref().is_some_and(|p| p.hwnd == hwnd) {
+                    if key == VK_ESCAPE.0 {
+                        self.close_popup(true);
+                    } else {
+                        self.popup_input(&Input::Key(key));
+                    }
+                }
+            }
+            Event::PopupGone(hwnd) => {
+                self.closing.retain(|p| p.hwnd != hwnd);
+                self.trim_if_idle();
+            }
             Event::Foreground(hwnd) => self.front_changed(hwnd),
             Event::AppBar { hwnd, code, on } => match code {
                 ABN_POSCHANGED => {
@@ -229,8 +281,12 @@ impl App {
                     bar.set_dpi(dpi, height);
                     self.dirty = true;
                 }
+                if self.popup.as_ref().is_some_and(|p| p.bar == hwnd) {
+                    self.close_popup(false);
+                }
             }
             Event::Displays | Event::ShellRestarted => {
+                self.drop_popups();
                 self.build_bars();
                 self.update_visibility();
             }
@@ -246,10 +302,18 @@ impl App {
     }
 
     fn broadcast(&mut self, signal: &Signal) {
-        for slot in &mut self.widgets {
-            if slot.widget.event(signal) {
-                self.dirty = true;
+        for i in 0..self.widgets.len() {
+            if self.widgets[i].widget.event(signal) {
+                self.changed(i);
             }
+        }
+    }
+
+    /// The widget in slot `i` changed: its pill, and its popup if it's open.
+    fn changed(&mut self, i: usize) {
+        self.dirty = true;
+        if self.popup.as_ref().is_some_and(|p| p.widget == self.widgets[i].name) {
+            self.popup_dirty = true;
         }
     }
 
@@ -259,6 +323,9 @@ impl App {
         if hwnd.0.is_null() {
             return;
         }
+        // Another app came in front (the hook doesn't see this process's windows): the popup
+        // closes, as if clicked away, even if it never got the front itself
+        self.close_popup(false);
         // The taskbar and the desktop leave the app that was in front as it was
         if !bar::is_shell(hwnd)
             && let Some(front) = front_app::resolve(hwnd, &mut self.names)
@@ -286,6 +353,11 @@ impl App {
                 changed = true;
             }
         }
+        if let Some(popup) = &self.popup
+            && !self.bars.iter().any(|b| b.hwnd == popup.bar && b.visible)
+        {
+            self.close_popup(false);
+        }
         let any = self.bars.iter().any(|b| b.visible);
         if any && self.gfx.is_none() {
             match Gfx::new() {
@@ -301,6 +373,7 @@ impl App {
                 Err(e) => log!("devices: {e}"),
             }
         } else if !any && self.gfx.is_some() {
+            self.drop_popups();
             for bar in &mut self.bars {
                 bar.release();
             }
@@ -356,12 +429,20 @@ impl App {
         Sides { left: group(&self.config.layout.left), center: group(&self.config.layout.center), right: group(&self.config.layout.right) }
     }
 
-    /// Brings every bar up to date, if something changed, and hands the changes to DWM at once.
+    /// Brings every bar, and the open popup, up to date if something changed.
     fn frame(&mut self) {
-        if !self.dirty || self.gfx.is_none() {
-            return;
+        if self.dirty && self.gfx.is_some() {
+            self.dirty = false;
+            self.render_bars();
         }
-        self.dirty = false;
+        if self.popup_dirty && self.gfx.is_some() {
+            self.popup_dirty = false;
+            self.render_popup();
+        }
+    }
+
+    /// Draws what changed in the bars and hands it to DWM at once.
+    fn render_bars(&mut self) {
         let sides = self.measure();
         let animate = self.animate();
         let Some(gfx) = &self.gfx else { return };
@@ -390,6 +471,7 @@ impl App {
     fn recover(&mut self, error: windows::core::Error) {
         self.failures += 1;
         log!("drawing failed ({error}), new devices (attempt {})", self.failures);
+        self.drop_popups();
         for bar in &mut self.bars {
             bar.release();
         }
@@ -413,6 +495,190 @@ impl App {
             Err(e) => log!("fonts: {e}"),
         }
         self.dirty = true;
+        self.popup_dirty = true;
+    }
+
+    // ---- popups ----------------------------------------------------------------------------
+
+    /// A click on a bar: on a pill with a popup it opens it, or closes it if it's open; anywhere
+    /// else it closes the open popup.
+    fn click(&mut self, hwnd: HWND, x: i32) {
+        let Some(index) = self.bars.iter().position(|b| b.hwnd == hwnd) else { return };
+        let hit = self.bars[index].pill_at(x);
+        if self.popup.as_ref().is_some_and(|p| p.bar == hwnd && Some(&p.widget) == hit.as_ref()) {
+            self.close_popup(true);
+            return;
+        }
+        match hit {
+            Some(name) if self.widgets.iter().any(|s| s.name == name && s.widget.has_popup()) => self.open_popup(&name, index),
+            _ => self.close_popup(true),
+        }
+    }
+
+    fn side_of(&self, name: &str) -> Side {
+        let layout = &self.config.layout;
+        if layout.left.iter().any(|n| n == name) {
+            Side::Left
+        } else if layout.center.iter().any(|n| n == name) {
+            Side::Center
+        } else {
+            Side::Right
+        }
+    }
+
+    /// Opens the popup of widget `name` under its pill in bar `index`, closing the open one.
+    fn open_popup(&mut self, name: &str, index: usize) {
+        // From one popup to the next, the window to go back to stays the one before the first
+        let previous = match self.popup.take() {
+            Some(popup) => {
+                let previous = popup.previous;
+                self.retire(popup);
+                previous
+            }
+            None => unsafe { GetForegroundWindow() },
+        };
+        let side = self.side_of(name);
+        let animate = self.animate();
+        let bar = &self.bars[index];
+        let Some((left, right, bottom)) = bar.pill_span(name) else { return };
+        let s = bar.scale;
+        let anchor = Anchor {
+            left,
+            right,
+            top: bottom + (self.config.bar.popup_gap * s).round() as i32,
+            side,
+            screen: bar.screen,
+            margin: (self.config.bar.margin * s).round() as i32,
+        };
+        let bar_hwnd = bar.hwnd;
+        let Some(gfx) = &self.gfx else { return };
+        let Some(slot) = self.widgets.iter_mut().find(|s| s.name == name) else { return };
+        let theme = &self.theme;
+        slot.widget.popup_shown(true);
+        let opened = Popup::new(name, bar_hwnd, previous, anchor, s, theme).and_then(|mut popup| match slot.widget.popup(theme, &popup.fonts) {
+            Some(scene) => {
+                popup.render(gfx, theme, scene)?;
+                popup.show(gfx, animate)?;
+                Ok(Some(popup))
+            }
+            None => Ok(None),
+        });
+        match opened {
+            Ok(Some(popup)) => self.popup = Some(popup),
+            Ok(None) => slot.widget.popup_shown(false),
+            Err(e) => {
+                log!("{name}: popup: {e}");
+                slot.widget.popup_shown(false);
+            }
+        }
+    }
+
+    /// Closes the open popup. With `restore` the window that was in front before comes back, if
+    /// the popup still is in front (the user didn't go somewhere else meanwhile).
+    fn close_popup(&mut self, restore: bool) {
+        let Some(popup) = self.popup.take() else { return };
+        if restore {
+            unsafe {
+                if GetForegroundWindow() == popup.hwnd && IsWindow(Some(popup.previous)).as_bool() {
+                    let _ = SetForegroundWindow(popup.previous);
+                }
+            }
+        }
+        self.retire(popup);
+        // Gone at once, without a fade: nothing will come to say so
+        self.trim_if_idle();
+    }
+
+    /// With no popup left, not even fading, the devices let go of what the popups left cached,
+    /// and the heaps give the freed pages back to Windows.
+    fn trim_if_idle(&self) {
+        if self.popup.is_none()
+            && self.closing.is_empty()
+            && let Some(gfx) = &self.gfx
+        {
+            gfx.trim();
+            process::release_memory();
+        }
+    }
+
+    /// A popup that closed: its widget lets go of what only the popup needed, and the window
+    /// fades out (and goes at `PopupGone`) or goes at once.
+    fn retire(&mut self, popup: Popup) {
+        if let Some(slot) = self.widgets.iter_mut().find(|s| s.name == popup.widget) {
+            slot.widget.popup_shown(false);
+        }
+        if self.animate()
+            && let Some(gfx) = &self.gfx
+            && popup.fade_out(gfx).and_then(|()| gfx.commit()).is_ok()
+        {
+            self.closing.push(popup);
+        }
+    }
+
+    /// Every popup goes at once, open or fading: before the bars or the devices go.
+    fn drop_popups(&mut self) {
+        if let Some(popup) = self.popup.take()
+            && let Some(slot) = self.widgets.iter_mut().find(|s| s.name == popup.widget)
+        {
+            slot.widget.popup_shown(false);
+        }
+        self.closing.clear();
+    }
+
+    /// Makes the open popup's scene again and draws it if it changed; None from the widget
+    /// closes the popup.
+    fn render_popup(&mut self) {
+        let Some(popup) = &mut self.popup else { return };
+        let Some(gfx) = &self.gfx else { return };
+        let Some(slot) = self.widgets.iter().find(|s| s.name == popup.widget) else { return };
+        let result = match slot.widget.popup(&self.theme, &popup.fonts) {
+            Some(scene) => popup.render(gfx, &self.theme, scene).and_then(|()| gfx.commit()),
+            None => {
+                self.close_popup(true);
+                return;
+            }
+        };
+        if let Err(e) = result {
+            self.recover(e);
+        }
+    }
+
+    /// The mouse over the popup: a click runs the action of the zone under it, a move takes the
+    /// hover tint along.
+    fn popup_mouse(&mut self, hwnd: HWND, at: Option<(i32, i32)>, click: bool) {
+        let Some(popup) = self.popup.as_mut().filter(|p| p.hwnd == hwnd) else { return };
+        if click {
+            if let Some(action) = at.and_then(|at| popup.action_at(at)) {
+                self.popup_input(&Input::Action(&action));
+            }
+            return;
+        }
+        let Some(gfx) = &self.gfx else { return };
+        match popup.mouse(gfx, &self.theme, at) {
+            Ok(true) => {
+                if let Err(e) = gfx.commit() {
+                    log!("popup: {e}");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => log!("popup hover: {e}"),
+        }
+    }
+
+    /// Hands an input to the open popup's widget and does what it replies.
+    fn popup_input(&mut self, input: &Input) {
+        let Some(name) = self.popup.as_ref().map(|p| p.widget.clone()) else { return };
+        let Some(slot) = self.widgets.iter_mut().find(|s| s.name == name) else { return };
+        match slot.widget.popup_input(input) {
+            Reply::Nothing => {}
+            Reply::Redraw => {
+                // The pill may show the change too
+                self.dirty = true;
+                self.popup_dirty = true;
+            }
+            Reply::Close => self.close_popup(true),
+            Reply::Opened => self.close_popup(false),
+        }
     }
 
     /// Something changed in the config dir: if it's the config file, everything starts again
@@ -434,6 +700,7 @@ impl App {
             return;
         }
         log!("config reloaded");
+        self.drop_popups();
         let bars_changed = config.bar != self.config.bar;
         self.config = config;
         self.widgets = make_widgets(&self.config);
@@ -456,6 +723,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.drop_popups();
         self.bars.clear();
         self.gfx = None;
         unsafe {

@@ -143,8 +143,26 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   `QUNS_RUNNING_D3D_FULL_SCREEN`). Per pill un visual con lo sfondo come contenuto, l'evidenziazione
   e il testo in visual figli; firme per ridisegnare solo ciò che cambia; scivolamenti con
   `Gfx::slide` (cubica ease-out eseguita da DWM).
+- Clic e popup: la barra (`WS_EX_NOACTIVATE`, `MA_NOACTIVATE`) manda `WM_LBUTTONDOWN` come
+  `Event::Click`; `Bar::pill_at` trova la pill dalla sola x (vale tutta l'altezza, fino al bordo
+  dello schermo). Un popup alla volta (`popup.rs`): una finestra `WS_EX_NOREDIRECTIONBITMAP`
+  topmost creata all'apertura e distrutta alla chiusura, con un visual radice che ha per
+  contenuto la scena e un visual figlio per la tinta dell'hover (il colore del testo all'8%),
+  che si sposta di zona in zona senza ridisegnare nulla. Il popup prende il primo piano
+  (`SetForegroundWindow`, permesso perché il processo ha appena ricevuto il clic) e si chiude a
+  `WM_ACTIVATE`/`WA_INACTIVE` o quando l'hook vede un'altra app in primo piano; Esc, Alt+F4 e la
+  pill lo chiudono restituendo il primo piano alla finestra di prima (`Popup::previous`, solo se
+  il popup è ancora davanti). Apertura: scende di 24 DIP in 0,25 s (cubica ease-out) e appare in
+  0,12 s; chiusura: dissolvenza di 0,1 s, finestra disabilitata e distrutta allo scadere di un
+  `SetTimer` (`PopupGone`). Si allinea alla pill dal lato del suo gruppo (sinistra, centro,
+  destra), a `popup_gap` sotto la barra, dentro lo schermo a `margin` dai bordi. Si chiude anche
+  se la sua barra si nasconde, coi device rilasciati, al cambio di schermi, DPI e config.
+  Il widget descrive il popup come `ui::Scene` (rettangoli arrotondati, testi, zone con
+  un'azione) in DIP; la firma della scena evita di ridisegnarla uguale. Trait: `has_popup`,
+  `popup_shown` (crea o butta ciò che serve solo al popup), `popup`, `popup_input`
+  (`Action`, `Wheel`, `Key` → `Reply`: `Nothing`, `Redraw`, `Close`, `Opened`).
 - `gfx.rs` (D3D11 WARP, D2D, DirectComposition, `draw` in DIP alla scala dello schermo), `ui.rs`
-  (`Pill` di `Item` di testo, misurati con DirectWrite), `theme.rs` (le 24 palette copiate dalla
+  (`Pill` di `Item` di testo, misurati con DirectWrite; `Scene` e `Fonts` dei popup), `theme.rs` (le 24 palette copiate dalla
   versione macOS + `windows` dal registro: `AppsUseLightTheme`, `Accent\AccentPalette`),
   `config.rs` (serde + toml, `deny_unknown_fields`, `rustybar check`), `process.rs` (DPI per
   schermo, priorità sotto il normale, EcoQoS, memoria a priorità bassa, un'istanza per cartella),
@@ -169,6 +187,13 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   contano come gioco in primo piano anche in finestra (niente animazioni; timer fermi salvo
   l'orologio, che resta perché la barra si vede).
 - **Disegno**: WARP, misurato contro il device GPU (vedi Stato).
+- **Popup**: il clic sulla pill non ruba il primo piano; il popup sì, come i riquadri della
+  taskbar di Windows: si chiude quando perde il primo piano (clic altrove, senza hook), con Esc o
+  con un nuovo clic sulla pill (con Esc e la pill il primo piano torna all'app di prima). Stile
+  Windows 11: angoli di 8, bordo di 1 px, scivolamento dall'alto e dissolvenza eseguiti da DWM.
+- **Calendario di `clock`**: un mese alla volta, ‹ › e rotella, «Oggi»; clic su un giorno →
+  Google Calendar su quel giorno nel browser (opzione `open`, un URL con `{year}` `{month}`
+  `{day}`).
 
 ## Widget della prima versione
 
@@ -176,13 +201,23 @@ Per ognuno, prima del codice, leggi il widget della versione macOS (`src/widgets
 doc del modulo è la specifica) e scrivi qui cosa fa su Windows: testi, stati, azioni, fonti dei
 dati.
 
-- `clock` (fatto, senza popup): data e ora nei formati di Windows (`GetDateFormatEx` con
+- `clock` (fatto): data e ora nei formati di Windows (`GetDateFormatEx` con
   `date`, predefinito `ddd dd/MM` → `Mar 10/11`, prima lettera maiuscola e senza punti;
   `GetTimeFormatEx` senza secondi), due testi nella pill a 10 DIP. Timer waitable a inizio minuto
   con 250 ms di tolleranza (Windows accorpa il risveglio), fermo senza barre visibili, rifatto a
-  risveglio, cambio d'ora e di formati. Da fare (dalla versione macOS): popup col calendario che
-  scorre i mesi, oggi evidenziato, settimana dal giorno della regione, weekend più tenui; clic su
-  un giorno → Calendario.
+  risveglio, cambio d'ora e di formati. Popup col calendario (260×292 DIP), un mese alla volta:
+  in alto la data lunga della regione (`DATE_LONGDATE`, `Martedì 10 novembre 2026`) e «Oggi»
+  nel colore `primary`; sotto ‹ `Novembre 2026` › (chevron di Segoe Fluent Icons, titolo da
+  `MMMM yyyy`); i giorni della settimana coi nomi più corti della regione
+  (`LOCALE_SSHORTESTDAYNAME1..7`, `lu ma me…`) dal primo giorno della regione
+  (`LOCALE_IFIRSTDAYOFWEEK`); sempre sei settimane, così il popup non cambia misura; oggi nel
+  tondo `primary` col testo `on_primary`, sabato e domenica in `overlay`. Mesi con ‹ ›, la
+  rotella (in su = indietro), ←/→, ↑/↓, PagSu/PagGiù; Home e «Oggi» tornano al mese corrente.
+  Clic su un giorno → `open` con `{year}` `{month}` `{day}` (predefinito Google Calendar, vista
+  del giorno; `""` toglie il clic) con `ShellExecuteW` dopo `AllowSetForegroundWindow`: la pagina
+  prende il primo piano e il popup si chiude senza restituirlo. Mese mostrato, primo giorno e
+  nomi letti all'apertura e buttati alla chiusura; a mezzanotte, col popup aperto, oggi si sposta
+  (lo scatto del minuto ridisegna il popup, che si disegna solo se la scena è cambiata).
 - `front_app` (fatto): nome dell'app in primo piano da `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`
   fuori processo, dalla `FileDescription` (poi `ProductName`, poi il nome del file) della versione
   dell'eseguibile, letta una volta per percorso; le app UWP dietro `ApplicationFrameHost.exe`
@@ -237,6 +272,27 @@ dati.
   chiude; WoW vero a schermo intero borderless in primo piano nasconde la barra principale e
   lascia l'altra. Primo frame con l'AppBar: 296 ms prima di spostare la registrazione dopo il
   primo frame, 41 ms dopo. Non visto a occhio: lo scivolamento (pill e evidenziazione), il
-  cambio di tema chiaro/scuro e di accento al volo, il cambio di DPI. Da fare: popup e clic
-  (prima il calendario di `clock`), poi `system`, `audio`, `network`, `claude`; installazione e
-  avvio con Windows.
+  cambio di tema chiaro/scuro e di accento al volo, il cambio di DPI.
+- 10/11/2026, **popup e clic**: clic sulle pill, popup (`popup.rs`, `ui::Scene`) e il
+  calendario di `clock`, con le decisioni sopra. Provato sulla barra di prova del secondo schermo
+  con messaggi alla finestra (il mouse non si muove; WoW era aperto): popup 260×292 px allineato
+  al bordo destro della pill a 6 px sotto la barra; mese successivo, rotella, ←/→, Home ed Esc
+  giusti (dicembre 2026 parte di martedì, ottobre di giovedì); la finestra sparisce a fine
+  dissolvenza. Con un messaggio simulato `SetForegroundWindow` è rifiutato (il processo non ha
+  ricevuto input vero): lo dice il log e il popup resta senza primo piano. Misure (barra di
+  prova, due barre visibili): a popup aperto +0,3–0,7 MB privati e +0,3–0,6 MB committed. Senza
+  pulizia, 251 aperture e chiusure: committed da 10,4 a 12,2 MB e poi fermo, handle costanti
+  (nessuna perdita, sono cache e pool). Con la pulizia a popup sparito (`Gfx::trim`:
+  `ID2D1Device::ClearResources` e `IDXGIDevice3::Trim`; `process::release_memory`:
+  `HeapSetInformation(HeapOptimizeResources)`, come `release_memory` su macOS): 5,9 MB committed
+  subito dopo la prima chiusura, 6,8 dopo 51, 8,2 un minuto dopo (ridisegnato l'orologio)
+  contro 8,6 di una barra appena avviata. A riposo dopo i popup: 3,9 MB privati, 0 ms di CPU
+  (16 ms al minuto con due barre: lo scatto del minuto), ~0,6 risvegli/s, GPU 0, 0 figli.
+  Disegnando in fretta (50 popup di fila) WARP fa crescere il pool di thread di Windows fino a
+  ~28; i worker inattivi escono da soli in circa un minuto (di nuovo 7–9). `measure.ps1` ora
+  conta i risvegli thread per thread (prima un thread che usciva rendeva il totale negativo).
+  Binario ~680 KB. Non provato con un mouse vero: il primo piano preso e restituito, la chiusura
+  col clic altrove, la tinta dell'hover (con un movimento simulato Windows manda subito
+  `WM_MOUSELEAVE`), l'animazione d'apertura a occhio, il clic su un giorno (aprirebbe il
+  browser). Da fare: `system`, `audio`, `network`, `claude` (specifiche da confermare con
+  l'utente); installazione e avvio con Windows.

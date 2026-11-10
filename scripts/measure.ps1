@@ -20,9 +20,22 @@ if (-not $procs) {
 $cores = [Environment]::ProcessorCount
 
 function Switches($procId) {
-    # Raw thread counters are running totals: two readings give the wake-ups in between
-    $threads = Get-CimInstance Win32_PerfRawData_PerfProc_Thread -Filter "IDProcess = $procId"
-    ($threads | Measure-Object -Property ContextSwitchesPersec -Sum).Sum
+    # Raw thread counters are running totals, by thread: two readings give the wake-ups in between
+    $totals = @{}
+    foreach ($t in Get-CimInstance Win32_PerfRawData_PerfProc_Thread -Filter "IDProcess = $procId") {
+        $totals[[int]$t.IDThread] = [long]$t.ContextSwitchesPersec
+    }
+    $totals
+}
+
+function SwitchesSince($before, $now) {
+    # Thread by thread: a thread that ended took its count with it (an idle worker of a thread pool
+    # going away), one that started counts from zero
+    $sum = 0
+    foreach ($id in $now.Keys) {
+        $sum += $now[$id] - $(if ($before.ContainsKey($id)) { $before[$id] } else { 0 })
+    }
+    $sum
 }
 
 $start = @{}
@@ -36,7 +49,7 @@ $elapsed = ((Get-Date) - $t0).TotalMilliseconds
 foreach ($p in $procs) {
     $p.Refresh()
     $cpuMs = ($p.TotalProcessorTime - $start[$p.Id].Cpu).TotalMilliseconds
-    $switches = (Switches $p.Id) - $start[$p.Id].Switches
+    $switches = SwitchesSince $start[$p.Id].Switches (Switches $p.Id)
     $perf = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Filter "IDProcess = $($p.Id)"
     $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($p.Id)")
     $gpuEngines = @(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue |

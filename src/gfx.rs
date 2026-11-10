@@ -18,7 +18,7 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionAnimation, IDCompositionDesktopDevice, IDCompositionSurface,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
 use windows::core::{Interface, Result};
 use windows_numerics::Matrix3x2;
 
@@ -31,8 +31,8 @@ pub const SLIDE: f64 = 0.22;
 pub struct Gfx {
     pub dcomp: IDCompositionDesktopDevice,
     pub hardware: bool,
-    _d2d: ID2D1Device,
-    _d3d: ID3D11Device,
+    d2d: ID2D1Device,
+    d3d: ID3D11Device,
 }
 
 fn d3d(hardware: bool) -> Result<ID3D11Device> {
@@ -69,7 +69,24 @@ impl Gfx {
             let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))?;
             let d2d = factory.CreateDevice(&dxgi)?;
             let dcomp: IDCompositionDesktopDevice = DCompositionCreateDevice2(&d2d)?;
-            Ok(Gfx { dcomp, hardware, _d2d: d2d, _d3d: d3d })
+            Ok(Gfx { dcomp, hardware, d2d, d3d })
+        }
+    }
+
+    /// Lets go of what drawing leaves cached for next time: Direct2D's resources (glyphs,
+    /// gradients) and the memory Direct3D keeps to reuse. For when a popup has gone: what it drew
+    /// won't be drawn again soon, and the bar's next redraw makes what it needs again.
+    pub fn trim(&self) {
+        unsafe {
+            self.d2d.ClearResources(0);
+            // Trim only frees what nothing is bound to
+            if let Ok(context) = self.d3d.GetImmediateContext() {
+                context.ClearState();
+                context.Flush();
+            }
+            if let Ok(dxgi) = self.d3d.cast::<IDXGIDevice3>() {
+                dxgi.Trim();
+            }
         }
     }
 
@@ -78,15 +95,30 @@ impl Gfx {
         unsafe { self.dcomp.CreateSurface(width.max(1), height.max(1), DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED) }
     }
 
-    /// An ease-out slide from `from` to `to` (pixels), run by DWM: the cubic
-    /// `from + Δ·(1 − (1 − t/d)³)`, written out as DirectComposition's coefficients.
+    /// A slide of a pill or a highlight from `from` to `to` (pixels).
     pub fn slide(&self, from: f32, to: f32) -> Result<IDCompositionAnimation> {
-        let d = SLIDE as f32;
+        self.ease_out(from, to, SLIDE)
+    }
+
+    /// An ease-out from `from` to `to` in `duration` seconds, run by DWM: the cubic
+    /// `from + Δ·(1 − (1 − t/d)³)`, written out as DirectComposition's coefficients.
+    pub fn ease_out(&self, from: f32, to: f32, duration: f64) -> Result<IDCompositionAnimation> {
+        let d = duration as f32;
         let delta = to - from;
         unsafe {
             let a = self.dcomp.CreateAnimation()?;
             a.AddCubic(0.0, from, 3.0 * delta / d, -3.0 * delta / (d * d), delta / (d * d * d))?;
-            a.End(SLIDE, to)?;
+            a.End(duration, to)?;
+            Ok(a)
+        }
+    }
+
+    /// A straight line from `from` to `to` in `duration` seconds (a fade), run by DWM.
+    pub fn linear(&self, from: f32, to: f32, duration: f64) -> Result<IDCompositionAnimation> {
+        unsafe {
+            let a = self.dcomp.CreateAnimation()?;
+            a.AddCubic(0.0, from, (to - from) / duration as f32, 0.0, 0.0)?;
+            a.End(duration, to)?;
             Ok(a)
         }
     }
