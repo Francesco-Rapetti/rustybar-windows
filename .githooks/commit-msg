@@ -1,0 +1,37 @@
+#!/bin/sh
+# Every commit is attributed to Francesco-Rapetti alone (see CLAUDE.md): this hook rejects a
+# commit whose author or committer is anyone else, any co-author trailer, and the signatures an
+# AI assistant leaves in a message. Enabled with `git config core.hooksPath .githooks`.
+
+msg_file="$1"
+owner="Francesco-Rapetti"
+
+fail() {
+    echo "commit-msg: $1" >&2
+    echo "commit-msg: commits are attributed to $owner only, see CLAUDE.md" >&2
+    exit 1
+}
+
+for who in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+    ident=$(git var "$who") || fail "cannot read $who"
+    name=${ident%% <*}
+    [ "$name" = "$owner" ] || fail "$who is '$name', not '$owner'"
+    if printf '%s\n' "$ident" | grep -qiE 'claude|anthropic'; then
+        fail "$who mentions Claude or Anthropic"
+    fi
+done
+
+# Comment lines are dropped by git before the commit is written, so they don't count.
+body=$(grep -v '^#' "$msg_file")
+
+if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*co-authored-by:'; then
+    fail "the message has a Co-authored-by trailer"
+fi
+if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*(signed-off-by|assisted-by|helped-by|reviewed-by|acked-by|generated-by|claude-session):.*(claude|anthropic)'; then
+    fail "the message has a trailer naming Claude or Anthropic"
+fi
+if printf '%s\n' "$body" | grep -qiE 'anthropic\.com|claude\.ai/code|claude\.com/claude-code|generated (with|by) .*claude'; then
+    fail "the message carries a Claude signature"
+fi
+
+exit 0
