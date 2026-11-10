@@ -1,0 +1,52 @@
+# RustyBar for Windows. Copy to %APPDATA%\rustybar\rustybar.toml. Every key below shows its default: delete what you
+# don't change. The bar reloads by itself when you save this file.
+
+[bar]
+height = 40          # the bar, in DIPs; the pills are centered in it
+margin = 8           # from the screen edges to the first and last pill
+reserve = true       # reserve the strip, as the taskbar does: maximized windows stop under it
+
+[theme]
+# The palette. windows: light or dark and the accent color of Windows, followed as they change.
+# Or catppuccin-mocha, catppuccin-macchiato, catppuccin-frappe, catppuccin-latte, dracula,
+# everforest-dark, everforest-light, gruvbox-dark, gruvbox-light, kanagawa-wave, kanagawa-dragon,
+# kanagawa-lotus, nord, one-dark, one-light, rose-pine, rose-pine-moon, rose-pine-dawn,
+# solarized-dark, solarized-light, tokyo-night, tokyo-night-storm, tokyo-night-moon,
+# tokyo-night-day. Every one has Catppuccin's color names.
+preset = "windows"
+primary = "accent"               # the highlight of the current desktop, and more to come
+font = "Segoe UI Variable Text"
+font_size = 13
+small_size = 11
+pill_height = 28
+pill_radius = 14
+pill_border = 1
+pill_padding = 10
+item_gap = 8                     # between pills
+animations = true                # also off when Windows has animations off
+
+# Override or add palette colors, by name or hex:
+# [theme.colors]
+# base = "#1e1e2e"
+
+[layout]
+left = ["workspaces", "front_app"]
+center = []
+right = ["clock"]
+
+[games]
+# Executables that count as a game while in front, even in a window: no animations. Any app that
+# covers a screen without a title bar (a game, a video, F11) hides the bar of that screen anyway.
+apps = []                        # e.g. ["wow.exe", "cs2.exe"]
+
+# Options of each widget, by its name in [layout]:
+#
+# [widgets.clock]
+# date = "ddd dd/MM"             # a Windows date picture; "" for the time alone
+#
+# [widgets.workspaces]
+# single = false                 # show the pill with a single desktop too
+#
+# Two widgets of the same kind: give the second a name of its own and its type.
+# [widgets.clock_utc]
+# type = "clock"

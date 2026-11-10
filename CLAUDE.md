@@ -38,11 +38,12 @@ conferma con l'utente prima di scrivere codice.
   `WS_EX_NOREDIRECTIONBITMAP` con un albero DirectComposition: il contenuto di pill e popup è
   disegnato con Direct2D e DirectWrite in superfici DirectComposition solo quando cambia;
   posizione, opacità, scala e ritaglio si animano con `IDCompositionAnimation`, che esegue DWM da
-  solo (come Core Animation su macOS: la barra non lavora durante un'animazione). Serve un device
-  Direct3D 11: da provare prima WARP (niente VRAM, rasterizza in CPU solo al cambio di contenuto)
-  e da confrontare con quello hardware, misurando. Animazioni spente con un gioco a schermo
-  intero e quando Windows ha le animazioni disattivate (`SPI_GETCLIENTAREAANIMATION`). Niente swap
-  chain, niente rendering continuo, niente vetro (Mica/Acrylic).
+  solo (come Core Animation su macOS: la barra non lavora durante un'animazione). Il device
+  Direct3D 11 è WARP (niente VRAM, rasterizza in CPU solo al cambio di contenuto): misurato
+  contro quello hardware, costa un settimo della RAM (vedi Stato). Animazioni spente con un
+  gioco a schermo intero e quando Windows ha le animazioni disattivate
+  (`SPI_GETCLIENTAREAANIMATION`). Niente swap chain, niente rendering continuo, niente vetro
+  (Mica/Acrylic).
 - **Niente polling quando Windows ha un evento**, come su macOS: `SetWinEventHook` con
   `WINEVENT_OUTOFCONTEXT` per l'app in primo piano, `RegisterPowerSettingNotification` e
   `WM_POWERBROADCAST` per alimentazione e batteria, `NotifyIpInterfaceChange` o
@@ -75,7 +76,7 @@ conferma con l'utente prima di scrivere codice.
 
 ## Obiettivi misurabili
 
-Da misurare dopo ogni cambiamento che può pesare (script `scripts/measure.ps1`, da scrivere):
+Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
 
 - RAM: working set privato < 10 MB a riposo (su macOS ~16–20 MB).
 - CPU: 0,0% a riposo, nessun risveglio periodico quando niente cambia (orologio a parte).
@@ -95,7 +96,11 @@ Da misurare dopo ogni cambiamento che può pesare (script `scripts/measure.ps1`,
   reti o eventi reali. Dati finti in `examples/mock`.
 - **Non cambiare lo stato reale del PC** nelle prove senza chiedere: Wi-Fi, Bluetooth, volume,
   dispositivo audio predefinito, barra delle applicazioni, avvio automatico, impostazioni di
-  sistema.
+  sistema, desktop virtuali (crearne o toglierne).
+- **L'utente può star giocando mentre lavori** (il 10/11/2026 c'era WoW a schermo intero sullo
+  schermo principale): niente prove che rubano il primo piano o coprono lo schermo (finestre di
+  prova a schermo intero, `SetForegroundWindow`) e niente AppBar di prova che sposta le finestre,
+  senza chiedere prima. Le prove normali vanno con una barra di prova a `reserve = false`.
 
 ## Ambiente e comandi
 
@@ -107,8 +112,46 @@ Da misurare dopo ogni cambiamento che può pesare (script `scripts/measure.ps1`,
 - Il hook è nella repo come eseguibile (`git add --chmod=+x`, già fatto nel primo commit).
 - In PowerShell il messaggio di commit va in un file con fine riga LF e poi `git commit -F <file>`:
   una here-string passata a `-F -` non arriva su stdin.
-- `cargo build --release`, `cargo test --release`, `cargo clippy --release` (quando ci sarà il
-  codice).
+- `cargo build --release`, `cargo test --release`, `cargo clippy --release` (zero avvisi).
+  `cargo` è in `%USERPROFILE%\.cargo\bin` (in Git Bash: `export PATH="$HOME/.cargo/bin:$PATH"`).
+- Barra di prova accanto a quella vera: una cartella con un `rustybar.toml` con
+  `[bar] reserve = false` (non sposta le finestre), poi `RUSTYBAR_CONFIG_DIR=<cartella>` e
+  `target\release\rustybar.exe`; con la stessa variabile `rustybar quit` chiude lei sola (le
+  variabili d'ambiente di PowerShell non restano fra un comando e l'altro: rimetterla ogni volta).
+  Log in `%LOCALAPPDATA%\rustybar\rustybar-<nome cartella>.log` (quella vera: `rustybar.log`), col
+  tempo del primo frame.
+- `scripts\measure.ps1 [-Id <pid>] [-Seconds 30]`: memoria privata, CPU, risvegli (cambi di
+  contesto dei thread), GPU (motori e memoria), thread, handle, figli e con cosa disegna (WARP o
+  driver GPU). Usa le classi WMI delle prestazioni, che hanno lo stesso nome in ogni lingua
+  (`Get-Counter` no: qui Windows è in italiano).
+- `RUSTYBAR_GPU=hardware`: device Direct3D hardware invece di WARP, per confrontare.
+- Screenshot della barra: `System.Drawing` `CopyFromScreen` sulla striscia in alto, poi guardarli.
+
+## Com'è fatta
+
+- `app.rs`: tutto sul main thread. Il ciclo dorme in `MsgWaitForMultipleObjectsEx` su: messaggi,
+  i handle dei widget (timer, registro) e la cartella della config. Window procedure e hook
+  mettono solo un `Event` in coda; il ciclo la svuota dopo il dispatch, così niente rientra
+  nell'app mentre lavora. Una finestra nascosta (`RustyBarControl`, titolo = cartella della
+  config) riceve i broadcast (schermi, tema, ora, risveglio, `TaskbarCreated`, `rustybar quit`).
+  Barra nascosta su ogni schermo → device rilasciati (`Gfx` a `None`), si rifanno quando una barra
+  torna. Animazioni solo se il tema le vuole, Windows le ha accese, nessun gioco della lista in
+  primo piano e tutte le barre visibili.
+- `bar.rs`: una barra per schermo (`WS_EX_NOREDIRECTIONBITMAP`, topmost, senza attivazione),
+  AppBar registrata dopo il primo frame (Explorer ci mette ~200 ms a spostare le finestre),
+  `fullscreen_here` (finestra in primo piano che copre lo schermo senza barra del titolo, o
+  `QUNS_RUNNING_D3D_FULL_SCREEN`). Per pill un visual con lo sfondo come contenuto, l'evidenziazione
+  e il testo in visual figli; firme per ridisegnare solo ciò che cambia; scivolamenti con
+  `Gfx::slide` (cubica ease-out eseguita da DWM).
+- `gfx.rs` (D3D11 WARP, D2D, DirectComposition, `draw` in DIP alla scala dello schermo), `ui.rs`
+  (`Pill` di `Item` di testo, misurati con DirectWrite), `theme.rs` (le 24 palette copiate dalla
+  versione macOS + `windows` dal registro: `AppsUseLightTheme`, `Accent\AccentPalette`),
+  `config.rs` (serde + toml, `deny_unknown_fields`, `rustybar check`), `process.rs` (DPI per
+  schermo, priorità sotto il normale, EcoQoS, memoria a priorità bassa, un'istanza per cartella),
+  `log.rs`, `i18n.rs`.
+- `widgets/`: un file per widget, registrato in `widgets::create` e in `KINDS`. Il trait `Widget`
+  ha `pill`, `handle` (un handle da aspettare), `signaled` ed `event` (`Signal`: `Foreground`,
+  `Resume`, `TimeChanged`, `Shown`); i due ultimi dicono se la pill è cambiata.
 
 ## Decisioni (con l'utente, 10/11/2026)
 
@@ -118,6 +161,14 @@ Da misurare dopo ogni cambiamento che può pesare (script `scripts/measure.ps1`,
 - **Workspace**: i desktop virtuali di Windows, niente tiling WM.
 - **Widget della prima versione**: `clock`, `front_app`, `workspaces`, `system`, `audio` con la
   musica, `network`, `claude`.
+- **Schermi**: una barra su ogni schermo; un gioco a schermo intero nasconde solo quella del suo.
+- **Lua**: rimandato; prima i widget in Rust.
+- **Temi**: `windows` (predefinito, segue chiaro/scuro e accento) più le 24 palette della
+  versione macOS.
+- **Giochi**: ogni app a schermo intero (anche borderless) più `[games] apps`, eseguibili che
+  contano come gioco in primo piano anche in finestra (niente animazioni; timer fermi salvo
+  l'orologio, che resta perché la barra si vede).
+- **Disegno**: WARP, misurato contro il device GPU (vedi Stato).
 
 ## Widget della prima versione
 
@@ -125,14 +176,27 @@ Per ognuno, prima del codice, leggi il widget della versione macOS (`src/widgets
 doc del modulo è la specifica) e scrivi qui cosa fa su Windows: testi, stati, azioni, fonti dei
 dati.
 
-- `clock`: ora e data, popup col calendario. Un risveglio al minuto, allineato.
-- `front_app`: app in primo piano da `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`, fuori dal
-  processo; nome dalla versione del file dell'eseguibile, icona in cache.
-- `workspaces`: desktop virtuali. Elenco e desktop attivo dal registro
-  (`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops`) con
-  `RegNotifyChangeKeyValue`, quindi a eventi; da verificare su questa build (26300). Il cambio di
-  desktop col clic non ha API pubblica: da scegliere fra le interfacce COM non documentate (che
-  cambiano fra le build) e `SendInput` di Ctrl+Win+←/→.
+- `clock` (fatto, senza popup): data e ora nei formati di Windows (`GetDateFormatEx` con
+  `date`, predefinito `ddd dd/MM` → `Mar 10/11`, prima lettera maiuscola e senza punti;
+  `GetTimeFormatEx` senza secondi), due testi nella pill a 10 DIP. Timer waitable a inizio minuto
+  con 250 ms di tolleranza (Windows accorpa il risveglio), fermo senza barre visibili, rifatto a
+  risveglio, cambio d'ora e di formati. Da fare (dalla versione macOS): popup col calendario che
+  scorre i mesi, oggi evidenziato, settimana dal giorno della regione, weekend più tenui; clic su
+  un giorno → Calendario.
+- `front_app` (fatto): nome dell'app in primo piano da `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`
+  fuori processo, dalla `FileDescription` (poi `ProductName`, poi il nome del file) della versione
+  dell'eseguibile, letta una volta per percorso; le app UWP dietro `ApplicationFrameHost.exe`
+  (la finestra figlia di un altro processo); taglio a 260 DIP con i puntini. Taskbar e desktop
+  lasciano l'app di prima. Icona: non c'è (neanche su macOS).
+- `workspaces` (fatto, da provare con più desktop): i desktop virtuali, un numero o il nome del
+  desktop, il corrente sotto l'evidenziazione `primary` che scivola. Dal registro
+  (`Explorer\VirtualDesktops`: `VirtualDesktopIDs`, `CurrentVirtualDesktop`,
+  `Desktops\{id}\Name`) con `RegNotifyChangeKeyValue`. Su questa build (26300) con un solo
+  desktop Explorer non scrive né l'elenco né il corrente (ci sono solo 33 voci vecchie di
+  sfondi in `Desktops`): la pill si nasconde (`single = true` la tiene). Da provare con l'utente,
+  che deve creare un secondo desktop: che i valori compaiano e cambino al cambio di desktop. Il
+  clic che cambia desktop non c'è: non ha API pubblica, da scegliere con l'utente fra le
+  interfacce COM non documentate (cambiano fra le build) e `SendInput` di Ctrl+Win+←/→.
 - `system`: CPU (`GetSystemTimes`) e RAM (`GlobalMemoryStatusEx`) su un timer lento, ridisegno
   solo se il numero mostrato cambia. GPU: niente PDH `GPU Engine` (enumera i processi, costa);
   da studiare `D3DKMTQueryStatistics` per nodo. Temperature solo con le API del produttore
@@ -151,12 +215,7 @@ dati.
 
 ## Domande aperte (da decidere con l'utente)
 
-- Schermi: la barra su tutti gli schermi o solo su quello principale?
-- Scripting Lua (`mlua` su macOS): utile ma pesa; proposta: rimandarlo.
-- Temi: proposta: le stesse 24 palette della versione macOS (Catppuccin e le altre), costano
-  solo qualche KB.
-- Giochi in finestra: lo schermo intero si riconosce, una finestra normale no. Basta lo schermo
-  intero (anche borderless) o serve altro?
+- Cambio di desktop col clic su `workspaces`: COM non documentato o `SendInput` (vedi sopra).
 
 ## Stato
 
@@ -164,3 +223,20 @@ dati.
   la guardia sulle attribuzioni (config locale, `.claude/settings.json`, hook), provata con
   `git commit` veri in una repo usa e getta. Prime decisioni con l'utente: posizione, aspetto,
   workspace, widget della prima versione (sopra).
+- 10/11/2026, **M1**: motore (processo, config che si ricarica, temi, WARP + DirectComposition,
+  una barra per schermo come AppBar, schermo intero, giochi della lista, ripresa dopo un errore
+  del device) e `clock`, `front_app`, `workspaces` senza popup né clic. Schermi qui: 5120×1440
+  (principale) e 1920×1080 sotto, 100%. Misurata con la barra di prova (`reserve = false`), a
+  riposo per 60 s: 5,3 MB privati (23 MB di working set con le DLL condivise), 0 ms di CPU,
+  ~0,7 risvegli/s (lo scatto del minuto), GPU 0% e 0 MB, 9 thread (i worker di WARP, fermi),
+  0 figli, primo frame 36–41 ms, binario ~620 KB. Col device GPU (`RUSTYBAR_GPU=hardware`):
+  37 MB privati, 9,5 MB di VRAM, 24 thread, 1041 handle, primo frame 121 ms: per questo WARP.
+  Provati con una barra di prova che riservava lo spazio: area di lavoro ridotta di 40 px su
+  entrambi gli schermi e ripristinata all'uscita; una finestra senza bordi sullo schermo
+  principale nasconde solo la sua barra (`ABN_FULLSCREENAPP` arriva) e la barra torna quando si
+  chiude; WoW vero a schermo intero borderless in primo piano nasconde la barra principale e
+  lascia l'altra. Primo frame con l'AppBar: 296 ms prima di spostare la registrazione dopo il
+  primo frame, 41 ms dopo. Non visto a occhio: lo scivolamento (pill e evidenziazione), il
+  cambio di tema chiaro/scuro e di accento al volo, il cambio di DPI. Da fare: popup e clic
+  (prima il calendario di `clock`), poi `system`, `audio`, `network`, `claude`; installazione e
+  avvio con Windows.

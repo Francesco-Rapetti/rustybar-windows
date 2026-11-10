@@ -1,0 +1,91 @@
+//! The process makes itself small before anything else: below normal priority, EcoQoS (on a
+//! hybrid CPU the scheduler keeps it on the efficient cores), low memory priority, and per-monitor
+//! DPI so that every screen draws at its own scale. One bar per config dir.
+
+use std::ffi::c_void;
+
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, WPARAM};
+use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+use windows::Win32::System::Threading::{
+    BELOW_NORMAL_PRIORITY_CLASS, CreateMutexW, GetCurrentProcess, MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_LOW,
+    PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    ProcessMemoryPriority, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+};
+use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
+use windows::core::HSTRING;
+
+use crate::log;
+
+/// The class of the hidden window that receives the broadcasts (display, theme, time, power).
+pub const CONTROL_CLASS: windows::core::PCWSTR = windows::core::w!("RustyBarControl");
+
+pub fn setup() {
+    unsafe {
+        if let Err(e) = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) {
+            log!("per-monitor DPI: {e}");
+        }
+        let process = GetCurrentProcess();
+        if let Err(e) = SetPriorityClass(process, BELOW_NORMAL_PRIORITY_CLASS) {
+            log!("priority: {e}");
+        }
+        let throttling = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        };
+        if let Err(e) = SetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            &throttling as *const _ as *const c_void,
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        ) {
+            log!("EcoQoS: {e}");
+        }
+        let memory = MEMORY_PRIORITY_INFORMATION { MemoryPriority: MEMORY_PRIORITY_LOW };
+        if let Err(e) = SetProcessInformation(
+            process,
+            ProcessMemoryPriority,
+            &memory as *const _ as *const c_void,
+            size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+        ) {
+            log!("memory priority: {e}");
+        }
+    }
+}
+
+/// The window title that tells instances apart: the config dir.
+pub fn instance_title() -> HSTRING {
+    HSTRING::from(crate::config::dir().to_string_lossy().as_ref())
+}
+
+/// Holds a named mutex for this config dir while the bar runs; None if another bar has it.
+pub fn single_instance() -> Option<HANDLE> {
+    let dir = crate::config::dir().to_string_lossy().to_lowercase();
+    // Mutex names can't hold backslashes
+    let name = HSTRING::from(format!("Local\\RustyBar-{}", dir.replace(['\\', ':'], "_")));
+    unsafe {
+        let mutex = CreateMutexW(None, true, &name).ok()?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(mutex);
+            return None;
+        }
+        Some(mutex)
+    }
+}
+
+/// `rustybar quit`: asks the bar of this config dir to close, as a sign-out would.
+pub fn quit_running() {
+    unsafe {
+        if let Ok(hwnd) = FindWindowW(CONTROL_CLASS, &instance_title()) {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Prints go to the terminal that started `rustybar check`, even though the binary is a GUI one.
+pub fn attach_console() {
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
