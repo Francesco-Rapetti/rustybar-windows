@@ -35,6 +35,14 @@ impl super::Widget for FrontApp {
         Some(Pill::new(vec![Item::text(&self.name, theme.text).max_width(260.0)]))
     }
 
+    /// Cut shorter.
+    fn compact(&self, theme: &Theme) -> Option<Pill> {
+        if self.name.is_empty() {
+            return None;
+        }
+        Some(Pill::new(vec![Item::text(&self.name, theme.text).max_width(120.0)]))
+    }
+
     fn event(&mut self, signal: &super::Signal) -> bool {
         if let super::Signal::Foreground(front) = signal
             && front.name != self.name

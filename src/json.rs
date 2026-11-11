@@ -55,6 +55,91 @@ impl Json {
     pub fn is_null(&self) -> bool {
         matches!(self, Json::Null)
     }
+
+    pub fn object(&self) -> Option<&BTreeMap<String, Json>> {
+        match self {
+            Json::Object(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn array(&self) -> &[Json] {
+        match self {
+            Json::Array(a) => a,
+            _ => &[],
+        }
+    }
+
+    /// An object of these members, for writing.
+    pub fn of<'a>(members: impl IntoIterator<Item = (&'a str, Json)>) -> Json {
+        Json::Object(members.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+}
+
+impl From<&str> for Json {
+    fn from(s: &str) -> Json {
+        Json::String(s.to_string())
+    }
+}
+
+impl From<f64> for Json {
+    fn from(n: f64) -> Json {
+        Json::Number(n)
+    }
+}
+
+impl From<bool> for Json {
+    fn from(b: bool) -> Json {
+        Json::Bool(b)
+    }
+}
+
+/// The value as JSON text: whole numbers without a fraction, strings escaped.
+impl std::fmt::Display for Json {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Json::Null => f.write_str("null"),
+            Json::Bool(b) => write!(f, "{b}"),
+            Json::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => write!(f, "{}", *n as i64),
+            Json::Number(n) if n.is_finite() => write!(f, "{n}"),
+            Json::Number(_) => f.write_str("null"),
+            Json::String(s) => {
+                f.write_str("\"")?;
+                for c in s.chars() {
+                    match c {
+                        '"' => f.write_str("\\\"")?,
+                        '\\' => f.write_str("\\\\")?,
+                        '\n' => f.write_str("\\n")?,
+                        '\r' => f.write_str("\\r")?,
+                        '\t' => f.write_str("\\t")?,
+                        c if (c as u32) < 0x20 => write!(f, "\\u{:04x}", c as u32)?,
+                        c => write!(f, "{c}")?,
+                    }
+                }
+                f.write_str("\"")
+            }
+            Json::Array(a) => {
+                f.write_str("[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                f.write_str("]")
+            }
+            Json::Object(m) => {
+                f.write_str("{")?;
+                for (i, (k, v)) in m.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{}:{v}", Json::String(k.clone()))?;
+                }
+                f.write_str("}")
+            }
+        }
+    }
 }
 
 impl std::ops::Index<&str> for Json {
@@ -208,5 +293,13 @@ mod tests {
         assert_eq!(Json::parse("[]"), Some(Json::Array(vec![])));
         assert_eq!(Json::parse("{\"a\":1} x"), None);
         assert_eq!(Json::parse("{\"a\":}"), None);
+    }
+
+    #[test]
+    fn written_and_read_back() {
+        let j = Json::of([("type", "auth".into()), ("id", 3.0.into()), ("ids", Json::Array(vec!["a\"b\n".into()])), ("t", 21.5.into())]);
+        let text = j.to_string();
+        assert_eq!(text, r#"{"id":3,"ids":["a\"b\n"],"t":21.5,"type":"auth"}"#);
+        assert_eq!(Json::parse(&text), Some(j));
     }
 }

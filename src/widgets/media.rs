@@ -2,40 +2,60 @@
 //! ones as the volume flyout's: Spotify, a browser, the Media Player…): `♪ Title  Artist`, dimmed
 //! with a pause sign while paused (or hidden, with `paused = false`), hidden when nothing plays.
 //! The popup is a player: the cover, the title, the artist and the app, where the track is (a
-//! click or a drag on the bar seeks, when the app allows it) and ⏮ ⏯ ⏭.
+//! click or a drag on the bar seeks, when the app allows it), shuffle, ⏮ ⏯ ⏭ and repeat (shuffle
+//! and repeat only for an app that takes them), and the app's own volume, as the volume mixer has
+//! it. With more than one app that has a session, a switch at the top picks the one the player is
+//! for (and the pill, while the popup is open); closing the popup goes back to the one Windows
+//! calls current. The popup takes its colors from the cover, as Android's media player does (see
+//! `palette`), unless `cover_colors = false`.
 //!
 //! The sessions come from `GlobalSystemMediaTransportControlsSessionManager` (GSMTC), which says
 //! when the current session changes, and the session when its track or its state does: the
 //! handlers run on threads of their own and only set an event (the track's properties, which come
 //! asynchronously, are fetched there too). Nothing is read on a timer: while the popup is open and
 //! the track plays, a timer moves the position once a second. The cover is read only for the open
-//! popup, decoded and scaled with WIC on the thread the properties arrive on, and dropped with
-//! the popup. While no bar shows every handler is removed.
+//! popup, decoded and scaled with WIC on the thread the properties arrive on, where its colors are
+//! worked out too, and dropped with the popup. The list of sessions is read, and followed, only
+//! while the popup is open. The app's volume is its audio sessions (Core Audio's
+//! `IAudioSessionManager2`, on every output in use), found by the app's executable or, for a
+//! packaged app, by its id; found when the popup opens and followed with `IAudioSessionEvents`
+//! until it closes. An app whose id is only a code (Firefox's) can't be told from its processes:
+//! no volume for it. While no bar shows every handler is removed.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager,
-    GlobalSystemMediaTransportControlsSessionMediaProperties as Properties, GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
+    GlobalSystemMediaTransportControlsSessionMediaProperties as Properties,
+    GlobalSystemMediaTransportControlsSessionPlaybackControls as Controls, GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
-use windows::Win32::Foundation::HANDLE;
+use windows::Media::MediaPlaybackAutoRepeatMode as Repeat;
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, S_OK};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapInterpolationModeHighQualityCubic,
     WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand, WICRect,
 };
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IStream};
+use windows::Win32::Media::Audio::{
+    AudioSessionDisconnectReason, AudioSessionState, AudioSessionStateExpired, DEVICE_STATE_ACTIVE, IAudioSessionControl, IAudioSessionControl2,
+    IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eRender,
+};
+use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+use windows::Win32::System::Com::{CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IStream};
 use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::System::WinRT::CreateStreamOverRandomAccessStream;
-use windows::core::HSTRING;
+use windows::core::{BOOL, GUID, HSTRING, Interface, PCWSTR, PWSTR, implement};
 
 use super::{Input, Reply, Signal};
 use crate::config::Options;
 use crate::i18n::t;
 use crate::log;
+use crate::palette::Palette;
 use crate::theme::Theme;
-use crate::ui::{Align, Font, Fonts, Image, Item, Pill, Rect, Scene, Weight};
+use crate::ui::{Align, Backdrop, Font, Fonts, Image, Item, Pill, Rect, Scene, Weight};
 use crate::wake::{Timer, Wake};
 
 // Segoe Fluent Icons
@@ -44,6 +64,9 @@ const PLAY: &str = "\u{E768}";
 const PAUSE: &str = "\u{E769}";
 const PREVIOUS: &str = "\u{E892}";
 const NEXT: &str = "\u{E893}";
+const SHUFFLE: &str = "\u{E8B1}";
+const REPEAT_ALL: &str = "\u{E8EE}";
+const REPEAT_ONE: &str = "\u{E8ED}";
 
 /// The cover's side, in pixels: twice its size in the popup, so it stays sharp at 200%.
 const COVER_PX: u32 = 152;
@@ -53,10 +76,12 @@ const MARGIN: f32 = 8.0;
 const INNER: f32 = 304.0;
 const WIDTH: f32 = INNER + 2.0 * MARGIN;
 const PAD: f32 = 12.0;
+const SOURCES_H: f32 = 30.0;
 const COVER: f32 = 76.0;
 const BAR_H: f32 = 20.0;
 const TIMES_H: f32 = 16.0;
 const CONTROLS_H: f32 = 44.0;
+const VOLUME_H: f32 = 32.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Track {
@@ -72,6 +97,11 @@ struct Playback {
     next: bool,
     toggle: bool,
     seek: bool,
+    /// Shuffle on or off, for an app that lets it change.
+    shuffle: Option<bool>,
+    /// What repeats (`MediaPlaybackAutoRepeatMode`: nothing, the track, the list), for an app that
+    /// lets it change.
+    repeat: Option<i32>,
 }
 
 impl Playback {
@@ -94,6 +124,12 @@ struct Timeline {
     updated: i64,
 }
 
+/// A cover, decoded, with its colors.
+struct Cover {
+    image: Arc<Image>,
+    palette: Option<Palette>,
+}
+
 /// What the handlers, on threads of their own, leave for the main thread.
 struct Shared {
     wake: Arc<Wake>,
@@ -101,12 +137,20 @@ struct Shared {
     session_changed: AtomicBool,
     playback_changed: AtomicBool,
     timeline_changed: AtomicBool,
+    /// The list of sessions changed (followed only while the popup is open).
+    sessions_changed: AtomicBool,
+    /// The app's volume changed (followed only while the popup is open).
+    volume_changed: AtomicBool,
     /// The session's number: results for an older one are dropped.
     generation: AtomicU64,
     track: Mutex<Option<(u64, Track)>>,
     /// Whether the popup wants the cover, and the cover.
     cover_wanted: AtomicBool,
-    cover: Mutex<Option<(u64, Option<Arc<Image>>)>>,
+    cover: Mutex<Option<(u64, Option<Cover>)>>,
+    /// Whether covers get their colors worked out (`cover_colors`).
+    cover_colors: bool,
+    /// The titles of the sessions whose app has no readable name, by the app's id, for the switch.
+    labels: Mutex<Vec<(String, String)>>,
 }
 
 impl Shared {
@@ -122,7 +166,10 @@ impl Shared {
                 let track = Track { title: text(properties.Title()), artist: text(properties.Artist()) };
                 *lock(&shared.track) = Some((generation, track));
                 if shared.cover_wanted.load(Ordering::Acquire) {
-                    let cover = decode_cover(&properties).map(Arc::new);
+                    let cover = decode_cover(&properties).map(|image| {
+                        let palette = if shared.cover_colors { Palette::of_bgra(&image.pixels, image.width as usize, 2) } else { None };
+                        Cover { image: Arc::new(image), palette }
+                    });
                     *lock(&shared.cover) = Some((generation, cover));
                 }
                 shared.wake.set();
@@ -131,6 +178,20 @@ impl Shared {
         if let Err(e) = asked {
             log!("media: can't ask for the track ({e})");
         }
+    }
+
+    /// Asks a session for its title, to name it in the switch when its app has no readable name.
+    fn label(self: &Arc<Shared>, session: &Session, aumid: String) {
+        let shared = self.clone();
+        let _ = session.TryGetMediaPropertiesAsync().and_then(|op| {
+            op.when(move |result| {
+                let title = result.and_then(|p| p.Title()).map(|s| s.to_string()).unwrap_or_default();
+                if !title.is_empty() {
+                    lock(&shared.labels).push((aumid, title));
+                    shared.wake.set();
+                }
+            })
+        });
     }
 }
 
@@ -146,12 +207,24 @@ struct Hooked {
     timeline: Option<i64>,
 }
 
+/// An app with a session, in the popup's switch: its id and what to call it.
+#[derive(Clone, Debug, PartialEq)]
+struct Source {
+    aumid: String,
+    name: String,
+}
+
 /// What the open popup needs.
 struct Open {
     app: String,
     cover: Option<Arc<Image>>,
+    palette: Option<Palette>,
     /// Where a drag on the bar is, until the mouse goes up.
     seek: Option<f32>,
+    /// The apps with a session, and the one picked in the switch.
+    sources: Vec<Source>,
+    pick: Option<String>,
+    volume: Option<AppVolume>,
 }
 
 pub struct Media {
@@ -159,6 +232,8 @@ pub struct Media {
     manager: Option<Manager>,
     /// The token of the manager's handler, while a bar shows.
     manager_token: Option<i64>,
+    /// The token of the handler of the list of sessions, while the popup is open.
+    sessions_token: Option<i64>,
     hooked: Option<Hooked>,
     aumid: String,
     track: Track,
@@ -180,10 +255,14 @@ impl Media {
             session_changed: AtomicBool::new(false),
             playback_changed: AtomicBool::new(false),
             timeline_changed: AtomicBool::new(false),
+            sessions_changed: AtomicBool::new(false),
+            volume_changed: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             track: Mutex::new(None),
             cover_wanted: AtomicBool::new(false),
             cover: Mutex::new(None),
+            cover_colors: options.bool("cover_colors").unwrap_or(true),
+            labels: Mutex::new(Vec::new()),
         });
         // The manager comes asynchronously: the first frame doesn't wait for it
         let s = shared.clone();
@@ -204,6 +283,7 @@ impl Media {
             shared,
             manager: None,
             manager_token: None,
+            sessions_token: None,
             hooked: None,
             aumid: String::new(),
             track: Track::default(),
@@ -231,10 +311,31 @@ impl Media {
         }
     }
 
+    /// Follows the list of sessions, for the popup's switch.
+    fn hook_sessions(&mut self) {
+        let Some(manager) = &self.manager else { return };
+        if self.sessions_token.is_none() {
+            let shared = self.shared.clone();
+            let handler = TypedEventHandler::new(move |_, _| {
+                shared.sessions_changed.store(true, Ordering::Release);
+                shared.wake.set();
+                Ok(())
+            });
+            self.sessions_token = manager.SessionsChanged(&handler).ok();
+        }
+    }
+
+    fn unhook_sessions(&mut self) {
+        if let (Some(manager), Some(token)) = (&self.manager, self.sessions_token.take()) {
+            let _ = manager.RemoveSessionsChanged(token);
+        }
+    }
+
     fn unhook(&mut self) {
         if let (Some(manager), Some(token)) = (&self.manager, self.manager_token.take()) {
             let _ = manager.RemoveCurrentSessionChanged(token);
         }
+        self.unhook_sessions();
         self.unhook_session();
     }
 
@@ -248,16 +349,32 @@ impl Media {
         }
     }
 
-    /// Starts following the current session, or none: its handlers, its state now, its track.
-    fn follow_current(&mut self) {
+    /// The session to follow: the one picked in the popup, else the one Windows calls current.
+    fn target(&self) -> Option<Session> {
+        let manager = self.manager.as_ref()?;
+        if let Some(pick) = self.open.as_ref().and_then(|o| o.pick.as_deref())
+            && let Some(session) = sessions(manager).into_iter().find(|s| aumid_of(s) == pick)
+        {
+            return Some(session);
+        }
+        manager.GetCurrentSession().ok()
+    }
+
+    /// Starts following the session to follow, or none: its handlers, its state now, its track.
+    fn follow(&mut self) {
         self.unhook_session();
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
-        let session = self.manager.as_ref().and_then(|m| m.GetCurrentSession().ok());
-        let Some(session) = session else {
+        let Some(session) = self.target() else {
             self.aumid.clear();
             self.track = Track::default();
             self.playback = Playback::default();
             self.timeline = Timeline::default();
+            if let Some(open) = &mut self.open {
+                open.app.clear();
+                open.cover = None;
+                open.palette = None;
+                open.volume = None;
+            }
             return;
         };
         let shared = self.shared.clone();
@@ -275,13 +392,25 @@ impl Media {
         });
         let properties = session.MediaPropertiesChanged(&on_properties).unwrap_or_default();
         let playback = session.PlaybackInfoChanged(&on_playback).unwrap_or_default();
-        self.aumid = session.SourceAppUserModelId().map(|s| s.to_string()).unwrap_or_default();
+        let aumid = aumid_of(&session);
+        let other_app = aumid != self.aumid;
+        self.aumid = aumid;
         self.shared.fetch(&session);
         self.hooked = Some(Hooked { session, properties, playback, timeline: None });
         self.read_playback();
         self.read_timeline();
         if self.open.is_some() {
             self.hook_timeline();
+            if other_app {
+                // Not the last app's cover, colors and volume until this one's come
+                if let Some(open) = &mut self.open {
+                    open.app = app_name(&self.aumid);
+                    open.cover = None;
+                    open.palette = None;
+                    open.seek = None;
+                }
+                self.read_volume();
+            }
         }
     }
 
@@ -302,15 +431,17 @@ impl Media {
         let Some(h) = &self.hooked else { return };
         let Ok(info) = h.session.GetPlaybackInfo() else { return };
         let controls = info.Controls().ok();
-        let can = |f: fn(&windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackControls) -> windows::core::Result<bool>| {
-            controls.as_ref().and_then(|c| f(c).ok()).unwrap_or(false)
-        };
+        let can = |f: fn(&Controls) -> windows::core::Result<bool>| controls.as_ref().and_then(|c| f(c).ok()).unwrap_or(false);
+        let shuffle = can(|c| c.IsShuffleEnabled()).then(|| info.IsShuffleActive().and_then(|r| r.Value()).unwrap_or(false));
+        let repeat = can(|c| c.IsRepeatEnabled()).then(|| info.AutoRepeatMode().and_then(|r| r.Value()).map(|m| m.0).unwrap_or(0));
         self.playback = Playback {
             status: info.PlaybackStatus().map(|s| s.0).unwrap_or(0),
             previous: can(|c| c.IsPreviousEnabled()),
             next: can(|c| c.IsNextEnabled()),
             toggle: can(|c| c.IsPlayPauseToggleEnabled()),
             seek: can(|c| c.IsPlaybackPositionEnabled()),
+            shuffle,
+            repeat,
         };
     }
 
@@ -325,19 +456,63 @@ impl Media {
         };
     }
 
+    /// The apps with a session, for the popup's switch; a picked app that has none any more goes
+    /// back to the current one.
+    fn read_sources(&mut self) {
+        let (Some(manager), Some(open)) = (&self.manager, &mut self.open) else { return };
+        let mut sources: Vec<Source> = Vec::new();
+        for session in sessions(manager) {
+            let aumid = aumid_of(&session);
+            if aumid.is_empty() || sources.iter().any(|s| s.aumid == aumid) {
+                continue;
+            }
+            let mut name = app_name(&aumid);
+            if name.is_empty() {
+                // Its title, which comes later, unless it came already
+                name = open.sources.iter().find(|s| s.aumid == aumid).map(|s| s.name.clone()).unwrap_or_default();
+                if name.is_empty() {
+                    self.shared.label(&session, aumid.clone());
+                }
+            }
+            sources.push(Source { aumid, name });
+        }
+        if let Some(pick) = &open.pick
+            && !sources.iter().any(|s| &s.aumid == pick)
+        {
+            open.pick = None;
+            self.shared.session_changed.store(true, Ordering::Release);
+        }
+        open.sources = sources;
+    }
+
+    /// Finds the audio sessions of the app followed, for the open popup.
+    fn read_volume(&mut self) {
+        let Some(open) = &mut self.open else { return };
+        // The sessions of the app before stop telling first
+        open.volume = None;
+        open.volume = AppVolume::find(&self.aumid, &self.shared);
+    }
+
     /// Takes what the handlers left: a new manager, a new session, a new state, a track, a cover.
     fn sync(&mut self) {
         if self.manager.is_none() {
             self.manager = lock(&self.shared.manager).take();
             if self.manager.is_some() && self.shown {
                 self.hook_manager();
+                if self.open.is_some() {
+                    self.hook_sessions();
+                    self.read_sources();
+                }
             }
         }
         if !self.shown {
             return;
         }
+        if self.shared.sessions_changed.swap(false, Ordering::AcqRel) {
+            self.read_sources();
+        }
         if self.shared.session_changed.swap(false, Ordering::AcqRel) {
-            self.follow_current();
+            self.follow();
         }
         if self.shared.playback_changed.swap(false, Ordering::AcqRel) {
             self.read_playback();
@@ -345,6 +520,19 @@ impl Media {
         }
         if self.shared.timeline_changed.swap(false, Ordering::AcqRel) {
             self.read_timeline();
+        }
+        let labels = std::mem::take(&mut *lock(&self.shared.labels));
+        if let Some(open) = &mut self.open {
+            for (aumid, title) in labels {
+                if let Some(s) = open.sources.iter_mut().find(|s| s.aumid == aumid && s.name.is_empty()) {
+                    s.name = title;
+                }
+            }
+            if self.shared.volume_changed.swap(false, Ordering::AcqRel)
+                && let Some(v) = &mut open.volume
+            {
+                v.read();
+            }
         }
         let generation = self.shared.generation.load(Ordering::Acquire);
         if let Some((g, track)) = lock(&self.shared.track).take()
@@ -356,7 +544,10 @@ impl Media {
             && g == generation
             && let Some(open) = &mut self.open
         {
-            open.cover = cover;
+            (open.cover, open.palette) = match cover {
+                Some(c) => (Some(c.image), c.palette),
+                None => (None, None),
+            };
         }
         self.schedule();
     }
@@ -397,6 +588,7 @@ impl Media {
 
 impl Drop for Media {
     fn drop(&mut self) {
+        self.open = None;
         self.unhook();
     }
 }
@@ -413,6 +605,16 @@ impl super::Widget for Media {
             items.push(Item::text(&self.track.artist, theme.subtext).max_width(160.0).space(8.0));
         }
         Some(Pill::new(items).gap(6.0))
+    }
+
+    /// The title alone, cut shorter.
+    fn compact(&self, theme: &Theme) -> Option<Pill> {
+        if !self.visible() {
+            return None;
+        }
+        let paused = !self.playback.playing();
+        let (icon, title) = if paused { (PAUSE, theme.subtext) } else { (NOTE, theme.text) };
+        Some(Pill::new(vec![Item::icon(icon, title), Item::text(&self.track.title, title).max_width(110.0)]).gap(6.0))
     }
 
     fn handles(&self) -> Vec<HANDLE> {
@@ -464,41 +666,96 @@ impl super::Widget for Media {
     fn popup_shown(&mut self, open: bool) {
         self.shared.cover_wanted.store(open && self.covers, Ordering::Release);
         if open {
-            self.open = Some(Open { app: app_name(&self.aumid), cover: None, seek: None });
+            self.open = Some(Open {
+                app: app_name(&self.aumid),
+                cover: None,
+                palette: None,
+                seek: None,
+                sources: Vec::new(),
+                pick: None,
+                volume: None,
+            });
             self.hook_timeline();
             self.read_timeline();
             if let Some(h) = &self.hooked {
                 let session = h.session.clone();
                 self.shared.fetch(&session);
             }
+            self.hook_sessions();
+            self.read_sources();
+            self.read_volume();
         } else {
-            self.open = None;
+            let picked = self.open.take().is_some_and(|o| o.pick.is_some());
+            self.unhook_sessions();
             *lock(&self.shared.cover) = None;
+            lock(&self.shared.labels).clear();
+            self.shared.volume_changed.store(false, Ordering::Release);
             if let Some(h) = &mut self.hooked
                 && let Some(t) = h.timeline.take()
             {
                 let _ = h.session.RemoveTimelinePropertiesChanged(t);
             }
+            // Back to the session Windows calls current
+            if picked && self.shown {
+                self.follow();
+            }
         }
         self.schedule();
     }
 
-    fn popup(&self, theme: &Theme, _fonts: &Fonts) -> Option<Scene> {
+    fn popup(&self, theme: &Theme, fonts: &Fonts) -> Option<Scene> {
         let open = self.open.as_ref()?;
-        if !self.visible() && self.track.title.is_empty() {
+        let switch = open.sources.len() >= 2;
+        if self.track.title.is_empty() && !switch {
             return None;
         }
+        // In the cover's colors, once they're there
+        let tinted = open.palette.map(|p| p.theme(theme));
+        let theme = tinted.as_ref().unwrap_or(theme);
         let position = self.position();
+        let volume = open.volume.as_ref().filter(|v| !v.sessions.is_empty());
         let mut height = MARGIN + PAD + COVER + PAD;
+        if switch {
+            height += SOURCES_H + 4.0;
+        }
         if position.is_some() {
             height += BAR_H + TIMES_H;
         }
-        height += CONTROLS_H + PAD + MARGIN - 4.0;
+        height += CONTROLS_H;
+        if volume.is_some() {
+            height += VOLUME_H + 4.0;
+        }
+        height += PAD + MARGIN - 4.0;
         let mut scene = Scene::new(WIDTH, height);
+        if tinted.is_some() {
+            scene.backdrop = Some(Backdrop::of(theme));
+        }
         let left = MARGIN + PAD;
+        let mut top = MARGIN;
+
+        // The apps with a session: which one the player is for
+        if switch {
+            let row = Rect::new(MARGIN, top, INNER, SOURCES_H);
+            scene.fill(row, 8.0, theme.tile(theme.primary, false));
+            let w = (INNER - 4.0) / open.sources.len() as f32;
+            let font = Font::new(theme.small_size, Weight::SemiBold);
+            for (i, source) in open.sources.iter().enumerate() {
+                let r = Rect::new(MARGIN + 2.0 + i as f32 * w, top + 2.0, w, SOURCES_H - 4.0);
+                let on = source.aumid == self.aumid;
+                if on {
+                    scene.fill(r, 6.0, theme.primary);
+                } else {
+                    scene.zone(r, 6.0, format!("source:{i}"));
+                }
+                let name = if source.name.is_empty() { "App" } else { source.name.as_str() };
+                let color = if on { theme.on_primary } else { theme.text };
+                scene.text(Rect::new(r.x + 6.0, r.y, r.w - 12.0, r.h), name, font, color, Align::Center);
+            }
+            top += SOURCES_H + 4.0;
+        }
 
         // The cover, or a note where it would be
-        let cover = Rect::new(left, MARGIN + PAD, COVER, COVER);
+        let cover = Rect::new(left, top + PAD, COVER, COVER);
         match &open.cover {
             Some(image) => scene.image(cover, 6.0, image.clone()),
             None => {
@@ -530,7 +787,7 @@ impl super::Widget for Media {
             scene.text(Rect::new(MARGIN + INNER - PAD - 80.0, y, 80.0, TIMES_H), clock(length), small, theme.subtext, Align::End);
             y += TIMES_H;
         }
-        // ⏮ ⏯ ⏭
+        // Shuffle, ⏮ ⏯ ⏭, repeat
         let mid = WIDTH / 2.0;
         let toggle = Rect::new(mid - 20.0, y + 2.0, 40.0, 40.0);
         let can = |on: bool| if on { theme.text } else { theme.overlay };
@@ -550,10 +807,70 @@ impl super::Widget for Media {
         if self.playback.next {
             scene.zone(next, 18.0, "next");
         }
+        // Lit in the accent when on
+        let mut mode = |r: Rect, glyph: &str, on: bool, action: &str| {
+            if on {
+                scene.fill(r, 18.0, theme.tile(theme.primary, true));
+            }
+            scene.text(r, glyph, Font::icons(14.0), if on { theme.primary } else { theme.text }, Align::Center);
+            scene.zone(r, 18.0, action);
+        };
+        if let Some(on) = self.playback.shuffle {
+            mode(Rect::new(left, y + 4.0, 36.0, 36.0), SHUFFLE, on, "shuffle");
+        }
+        if let Some(repeat) = self.playback.repeat {
+            let glyph = if repeat == Repeat::Track.0 { REPEAT_ONE } else { REPEAT_ALL };
+            mode(Rect::new(MARGIN + INNER - PAD - 36.0, y + 4.0, 36.0, 36.0), glyph, repeat != Repeat::None.0, "repeat");
+        }
+        y += CONTROLS_H;
+
+        // The app's own volume: the speaker (a click mutes), the slider, the percentage
+        if let Some(v) = volume {
+            y += 4.0;
+            let percent = (v.level * 100.0).round() as u32;
+            let color = if v.muted { theme.subtext } else { theme.text };
+            let button = Rect::new(left - 6.0, y, 32.0, VOLUME_H);
+            scene.text(button, super::audio::speaker(percent, v.muted), Font::icons(14.0), color, Align::Center);
+            scene.zone(button, theme.row_radius, "mute");
+            let small = Font::new(theme.small_size, Weight::Medium);
+            let percent_w = fonts.width("100%", small).ceil();
+            let right = MARGIN + INNER - PAD;
+            scene.text(Rect::new(right - percent_w, y, percent_w, VOLUME_H), format!("{percent}%"), small, color, Align::End);
+            let track = Rect::new(button.x + button.w + 8.0, y, right - percent_w - 12.0 - (button.x + button.w + 8.0), VOLUME_H);
+            super::audio::slider(&mut scene, theme, track, v.level, !v.muted);
+            scene.slider(Rect::new(track.x - 8.0, track.y, track.w + 16.0, track.h), "volume");
+        }
         Some(scene)
     }
 
     fn popup_input(&mut self, input: &Input) -> Reply {
+        // What doesn't go to the session: the switch and the app's volume
+        match input {
+            Input::Action(a) if a.starts_with("source:") => {
+                let index = a.strip_prefix("source:").and_then(|i| i.parse::<usize>().ok());
+                let picked = index.and_then(|i| self.open.as_ref()?.sources.get(i)).map(|s| s.aumid.clone());
+                let (Some(aumid), Some(open)) = (picked, self.open.as_mut()) else { return Reply::Nothing };
+                open.pick = Some(aumid);
+                self.follow();
+                self.schedule();
+                return Reply::Redraw;
+            }
+            Input::Action("mute") => {
+                if let Some(v) = self.open.as_mut().and_then(|o| o.volume.as_mut()) {
+                    v.set_mute(!v.muted);
+                    return Reply::Redraw;
+                }
+                return Reply::Nothing;
+            }
+            Input::Slide("volume", fraction) => {
+                if let Some(v) = self.open.as_mut().and_then(|o| o.volume.as_mut()) {
+                    v.set_level(*fraction);
+                    return Reply::Redraw;
+                }
+                return Reply::Nothing;
+            }
+            _ => {}
+        }
         let Some(h) = &self.hooked else { return Reply::Nothing };
         let session = h.session.clone();
         match input {
@@ -568,6 +885,20 @@ impl super::Widget for Media {
             Input::Action("next") => {
                 let _ = session.TrySkipNextAsync();
                 Reply::Nothing
+            }
+            // The change shows at once; the app's word corrects it
+            Input::Action("shuffle") => {
+                let Some(on) = self.playback.shuffle else { return Reply::Nothing };
+                let _ = session.TryChangeShuffleActiveAsync(!on);
+                self.playback.shuffle = Some(!on);
+                Reply::Redraw
+            }
+            Input::Action("repeat") => {
+                let Some(repeat) = self.playback.repeat else { return Reply::Nothing };
+                let next = next_repeat(repeat);
+                let _ = session.TryChangeAutoRepeatModeAsync(Repeat(next));
+                self.playback.repeat = Some(next);
+                Reply::Redraw
             }
             Input::Key(k) if *k == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE.0 && self.playback.toggle => {
                 let _ = session.TryTogglePlayPauseAsync();
@@ -595,6 +926,193 @@ impl super::Widget for Media {
     }
 }
 
+/// Repeat, one click after another: nothing, the whole list, the track, nothing again.
+fn next_repeat(repeat: i32) -> i32 {
+    match Repeat(repeat) {
+        Repeat::None => Repeat::List.0,
+        Repeat::List => Repeat::Track.0,
+        _ => Repeat::None.0,
+    }
+}
+
+/// Every session Windows has, in its order.
+fn sessions(manager: &Manager) -> Vec<Session> {
+    let Ok(list) = manager.GetSessions() else { return Vec::new() };
+    (0..list.Size().unwrap_or(0)).filter_map(|i| list.GetAt(i).ok()).collect()
+}
+
+fn aumid_of(session: &Session) -> String {
+    session.SourceAppUserModelId().map(|s| s.to_string()).unwrap_or_default()
+}
+
+/// Core Audio's word that an audio session of the app changed: its volume, or its state.
+#[implement(IAudioSessionEvents)]
+struct SessionEvents {
+    shared: Arc<Shared>,
+}
+
+impl SessionEvents_Impl {
+    fn poke(&self) {
+        self.shared.volume_changed.store(true, Ordering::Release);
+        self.shared.wake.set();
+    }
+}
+
+impl IAudioSessionEvents_Impl for SessionEvents_Impl {
+    fn OnDisplayNameChanged(&self, _: &PCWSTR, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnIconPathChanged(&self, _: &PCWSTR, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnSimpleVolumeChanged(&self, _: f32, _: BOOL, _: *const GUID) -> windows::core::Result<()> {
+        self.poke();
+        Ok(())
+    }
+
+    fn OnChannelVolumeChanged(&self, _: u32, _: *const f32, _: u32, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnGroupingParamChanged(&self, _: *const GUID, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnStateChanged(&self, _: AudioSessionState) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnSessionDisconnected(&self, _: AudioSessionDisconnectReason) -> windows::core::Result<()> {
+        self.poke();
+        Ok(())
+    }
+}
+
+/// The app's own volume, as the volume mixer has it: its audio sessions, on every output in use.
+/// They're set together and read from the first.
+struct AppVolume {
+    sessions: Vec<(IAudioSessionControl, ISimpleAudioVolume)>,
+    events: IAudioSessionEvents,
+    level: f32,
+    muted: bool,
+}
+
+impl AppVolume {
+    /// The audio sessions of the app behind the media session `aumid`, told by Core Audio when
+    /// they change; None for an app whose id is only a code, or without Core Audio.
+    fn find(aumid: &str, shared: &Arc<Shared>) -> Option<AppVolume> {
+        if app_name(aumid).is_empty() {
+            return None;
+        }
+        let events: IAudioSessionEvents = SessionEvents { shared: shared.clone() }.into();
+        let mut sessions = Vec::new();
+        unsafe {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            let devices = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).ok()?;
+            // Whether each process is the app's, asked once
+            let mut processes: HashMap<u32, bool> = HashMap::new();
+            for i in 0..devices.GetCount().unwrap_or(0) {
+                let Ok(device) = devices.Item(i) else { continue };
+                let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
+                let Ok(list) = manager.GetSessionEnumerator() else { continue };
+                for j in 0..list.GetCount().unwrap_or(0) {
+                    let Ok(control) = list.GetSession(j) else { continue };
+                    let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+                    if control2.IsSystemSoundsSession() == S_OK || control.GetState().is_ok_and(|s| s == AudioSessionStateExpired) {
+                        continue;
+                    }
+                    let Ok(pid) = control2.GetProcessId() else { continue };
+                    if pid == 0 || !*processes.entry(pid).or_insert_with(|| same_app(aumid, pid)) {
+                        continue;
+                    }
+                    let Ok(volume) = control.cast::<ISimpleAudioVolume>() else { continue };
+                    let _ = control.RegisterAudioSessionNotification(&events);
+                    sessions.push((control, volume));
+                }
+            }
+        }
+        let mut v = AppVolume { sessions, events, level: 0.0, muted: false };
+        v.read();
+        Some(v)
+    }
+
+    fn read(&mut self) {
+        let Some((_, volume)) = self.sessions.first() else { return };
+        unsafe {
+            self.level = volume.GetMasterVolume().unwrap_or(self.level);
+            self.muted = volume.GetMute().map(|m| m.as_bool()).unwrap_or(self.muted);
+        }
+    }
+
+    /// Sets the level; raising it takes the mute away, as Windows' sliders do.
+    fn set_level(&mut self, level: f32) {
+        let level = level.clamp(0.0, 1.0);
+        for (_, volume) in &self.sessions {
+            unsafe {
+                let _ = volume.SetMasterVolume(level, std::ptr::null());
+                if self.muted && level > self.level {
+                    let _ = volume.SetMute(false, std::ptr::null());
+                }
+            }
+        }
+        if level > self.level {
+            self.muted = false;
+        }
+        self.level = level;
+    }
+
+    fn set_mute(&mut self, muted: bool) {
+        for (_, volume) in &self.sessions {
+            unsafe {
+                let _ = volume.SetMute(muted, std::ptr::null());
+            }
+        }
+        self.muted = muted;
+    }
+}
+
+impl Drop for AppVolume {
+    fn drop(&mut self) {
+        for (control, _) in &self.sessions {
+            unsafe {
+                let _ = control.UnregisterAudioSessionNotification(&self.events);
+            }
+        }
+    }
+}
+
+/// Whether the process `pid` is the app behind the media session `aumid`: a packaged app by its
+/// id, any other by its executable's name.
+fn same_app(aumid: &str, pid: u32) -> bool {
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let same = if aumid.contains('!') {
+            GetApplicationUserModelId(process, &mut len, Some(PWSTR(buf.as_mut_ptr()))) == ERROR_SUCCESS
+                && String::from_utf16_lossy(&buf[..len.saturating_sub(1) as usize]).eq_ignore_ascii_case(aumid)
+        } else {
+            QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok()
+                && same_executable(aumid, &String::from_utf16_lossy(&buf[..len as usize]))
+        };
+        let _ = CloseHandle(process);
+        same
+    }
+}
+
+/// Whether a desktop app's id names the executable at `path`: `Spotify.exe`, `chrome` for
+/// `chrome.exe`, `MSEdge` for `msedge.exe`, a path for itself.
+fn same_executable(aumid: &str, path: &str) -> bool {
+    let stem = |s: &str| {
+        let file = s.rsplit(['\\', '/']).next().unwrap_or(s).to_ascii_lowercase();
+        file.strip_suffix(".exe").map(str::to_string).unwrap_or(file)
+    };
+    let id = stem(aumid);
+    !id.is_empty() && id == stem(path)
+}
+
 /// Windows' clock, as the media sessions write their times: 100 ns since 1601.
 fn now() -> i64 {
     let t = unsafe { GetSystemTimePreciseAsFileTime() };
@@ -618,6 +1136,7 @@ fn app_name(aumid: &str) -> String {
 
 fn readable(aumid: &str) -> String {
     let name = aumid.rsplit('!').next().unwrap_or(aumid);
+    let name = name.rsplit(['\\', '/']).next().unwrap_or(name);
     let name = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
     let name = name.rsplit('.').next().filter(|s| !s.is_empty()).unwrap_or(name);
     let mut chars = name.chars();
@@ -674,7 +1193,26 @@ mod tests {
         assert_eq!(readable("Spotify.exe"), "Spotify");
         assert_eq!(readable("chrome"), "Chrome");
         assert_eq!(readable("Contoso.Player_abc123!App"), "App");
+        assert_eq!(readable(r"C:\Program Files\Player\player.exe"), "Player");
         assert_eq!(app_name("308046B0AF4A39CB"), "");
         assert_eq!(app_name("Spotify.exe"), "Spotify");
+    }
+
+    /// A desktop app's id against the executables of the audio sessions.
+    #[test]
+    fn apps_by_their_executable() {
+        assert!(same_executable("Spotify.exe", r"C:\Users\someone\AppData\Roaming\Spotify\Spotify.exe"));
+        assert!(same_executable("chrome", r"C:\Program Files\Google\Chrome\Application\chrome.exe"));
+        assert!(same_executable("MSEdge", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"));
+        assert!(same_executable(r"C:\Tools\player.exe", r"C:\Tools\Player.EXE"));
+        assert!(!same_executable("Spotify.exe", r"C:\Program Files\Google\Chrome\Application\chrome.exe"));
+        assert!(!same_executable("", r"C:\a.exe"));
+    }
+
+    #[test]
+    fn repeat_goes_round() {
+        assert_eq!(next_repeat(Repeat::None.0), Repeat::List.0);
+        assert_eq!(next_repeat(Repeat::List.0), Repeat::Track.0);
+        assert_eq!(next_repeat(Repeat::Track.0), Repeat::None.0);
     }
 }

@@ -340,17 +340,34 @@ impl Zone {
     }
 }
 
+/// A popup's own colors instead of the theme's (a player in its cover's colors): its background,
+/// its border, and the text color the hover tint is made of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Backdrop {
+    pub base: Rgba,
+    pub border: Rgba,
+    pub text: Rgba,
+}
+
+impl Backdrop {
+    pub fn of(theme: &Theme) -> Backdrop {
+        Backdrop { base: theme.base, border: theme.surface, text: theme.text }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
     pub width: f32,
     pub height: f32,
     pub shapes: Vec<Shape>,
     pub zones: Vec<Zone>,
+    /// None: the theme's.
+    pub backdrop: Option<Backdrop>,
 }
 
 impl Scene {
     pub fn new(width: f32, height: f32) -> Scene {
-        Scene { width, height, shapes: Vec::new(), zones: Vec::new() }
+        Scene { width, height, shapes: Vec::new(), zones: Vec::new(), backdrop: None }
     }
 
     pub fn fill(&mut self, rect: Rect, radius: f32, color: Rgba) {
@@ -383,6 +400,7 @@ impl Scene {
     pub fn signature(&self) -> u64 {
         let mut h = DefaultHasher::new();
         (self.width.to_bits(), self.height.to_bits()).hash(&mut h);
+        self.backdrop.map(|b| (b.base.bits(), b.border.bits(), b.text.bits())).hash(&mut h);
         for shape in &self.shapes {
             match shape {
                 Shape::Fill { rect, radius, color } => {

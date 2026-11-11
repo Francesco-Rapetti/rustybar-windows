@@ -610,6 +610,17 @@ impl super::Widget for Network {
         Some(Pill::new(items).gap(6.0))
     }
 
+    /// The icons alone: the lock of a VPN, the connection's (colored when it's in trouble).
+    fn compact(&self, theme: &Theme) -> Option<Pill> {
+        let (_, color) = self.status(theme);
+        let mut items = Vec::new();
+        if self.vpn.is_some() {
+            items.push(Item::icon(LOCK, theme.text));
+        }
+        items.push(Item::icon(self.icon(), if self.trouble() == 0 { theme.text } else { color }));
+        Some(Pill::new(items).gap(8.0))
+    }
+
     fn handles(&self) -> Vec<HANDLE> {
         let mut handles: Vec<HANDLE> = self.shared.wake.handle().into_iter().collect();
         // The positions matter: 1 the timer, 2 the ping

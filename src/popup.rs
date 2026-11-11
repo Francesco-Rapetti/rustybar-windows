@@ -33,7 +33,7 @@ use crate::app::{Event, push};
 use crate::gfx::{self, Gfx};
 use crate::log;
 use crate::theme::{Rgba, Theme};
-use crate::ui::{Align, Fonts, Image, Rect, Scene, Shape, Zone};
+use crate::ui::{Align, Backdrop, Fonts, Image, Rect, Scene, Shape, Zone};
 
 const CLASS: PCWSTR = w!("RustyBarPopup");
 /// Not in the parts of the `windows` crate the bar uses (it's in `Win32_UI_Controls`).
@@ -392,7 +392,8 @@ impl Popup {
                 }
                 Some((rect, radius)) => {
                     let size = ((rect.w * s).round() as u32, (rect.h * s).round() as u32);
-                    let tint = Rgba(theme.text.0, theme.text.1, theme.text.2, TINT);
+                    let text = self.scene.backdrop.map_or(theme.text, |b| b.text);
+                    let tint = Rgba(text.0, text.1, text.2, TINT);
                     let key = (size.0, size.1, radius.to_bits(), tint.bits());
                     if comp.hover_key != key || comp.hover_surface.is_none() {
                         let surface = gfx.surface(size.0, size.1)?;
@@ -430,15 +431,16 @@ impl Drop for Popup {
 /// Draws the popup: its background and border, then the scene's shapes in order.
 fn draw(surface: &IDCompositionSurface, s: f32, theme: &Theme, scene: &Scene, fonts: &Fonts) -> Result<()> {
     let (w, h) = (scene.width, scene.height);
+    let colors = scene.backdrop.unwrap_or_else(|| Backdrop::of(theme));
     gfx::draw(surface, s, |ctx, brush| unsafe {
         let b = theme.popup_border;
         let r = (theme.popup_radius - b / 2.0).max(0.0);
         // The border inside the edge, so the popup keeps its size
         let outline = D2D1_ROUNDED_RECT { rect: gfx::rect(b / 2.0, b / 2.0, w - b, h - b), radiusX: r, radiusY: r };
-        brush.SetColor(&gfx::color(theme.base));
+        brush.SetColor(&gfx::color(colors.base));
         ctx.FillRoundedRectangle(&outline, brush);
         if b > 0.0 {
-            brush.SetColor(&gfx::color(theme.surface));
+            brush.SetColor(&gfx::color(colors.border));
             ctx.DrawRoundedRectangle(&outline, brush, b, None);
         }
         for shape in &scene.shapes {

@@ -327,6 +327,15 @@ impl super::Widget for Claude {
         Some(Pill::new(items).gap(4.0))
     }
 
+    /// The session's share alone.
+    fn compact(&self, theme: &Theme) -> Option<Pill> {
+        let a = self.account.as_ref()?;
+        let session = a.session.as_ref()?;
+        let color = if a.stale { theme.subtext } else { self.level(theme, session.percent, theme.text) };
+        let spark = if a.stale { theme.subtext } else { self.spark_color(theme) };
+        Some(Pill::new(vec![Item::text(SPARK, spark), Item::text(format!("{}%", session.percent), color).space(6.0)]))
+    }
+
     fn handles(&self) -> Vec<HANDLE> {
         self.slots().into_iter().map(|(_, h)| h).collect()
     }

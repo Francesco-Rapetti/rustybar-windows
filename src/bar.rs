@@ -31,16 +31,18 @@ use crate::app::{Event, push};
 use crate::gfx::{self, Gfx};
 use crate::log;
 use crate::theme::Theme;
+use crate::fit::Fitted;
 use crate::ui::Measured;
 
 /// The message the shell sends AppBar notifications with.
 pub const WM_APPBAR: u32 = WM_APP + 1;
 
 /// How far the highlight reaches past its item, in DIPs, sideways and up and down.
-const HIGHLIGHT_X: f32 = 5.0;
-const HIGHLIGHT_Y: f32 = 4.0;
+pub const HIGHLIGHT_X: f32 = 5.0;
+pub const HIGHLIGHT_Y: f32 = 4.0;
 
-/// The pills of the three groups, measured once for every screen.
+/// The pills of the three groups, in the forms that fit the bar (see `fit`).
+#[derive(Clone)]
 pub struct Sides {
     pub left: Vec<Measured>,
     pub center: Vec<Measured>,
@@ -70,6 +72,7 @@ struct PillVisual {
     background_sig: u64,
     text_sig: u64,
     x: f32,
+    y: f32,
     highlight: Option<Highlight>,
     /// Where each item is in the pill, in pixels: its left edge and its width, for a click.
     items: Vec<(f32, f32)>,
@@ -88,6 +91,8 @@ pub struct Bar {
     pub visible: bool,
     comp: Option<Comp>,
     pills: HashMap<String, PillVisual>,
+    /// How the pills fit this bar (see `fit`).
+    pub fit: Fitted,
 }
 
 const CLASS: windows::core::PCWSTR = w!("RustyBarBar");
@@ -171,6 +176,7 @@ impl Bar {
             visible: false,
             comp: None,
             pills: HashMap::new(),
+            fit: Fitted::default(),
         };
         bar.place();
         Ok(bar)
@@ -364,6 +370,7 @@ impl Bar {
                             background_sig: 0,
                             text_sig: 0,
                             x: left,
+                            y,
                             highlight: None,
                             items: Vec::new(),
                         },
@@ -393,6 +400,7 @@ impl Bar {
                 pv.text_sig = text_sig;
             }
             highlight(gfx, pv, m, theme, s, animate && !fresh)?;
+            pv.y = y;
             if pv.x != left {
                 unsafe {
                     if animate {
@@ -426,9 +434,34 @@ impl Bar {
         Some((key.clone(), item))
     }
 
-    /// A pill's left and right edges, and the bar's bottom, in screen pixels.
+    /// Every pill's rectangle in screen pixels, left to right, by its widget's name.
+    pub fn pill_rects(&self) -> Vec<(String, RECT)> {
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(self.hwnd, &mut r) }.is_err() {
+            return Vec::new();
+        }
+        let mut list: Vec<(String, RECT)> = self
+            .pills
+            .iter()
+            .map(|(key, pv)| {
+                let left = r.left + pv.x as i32;
+                let top = r.top + pv.y as i32;
+                (key.clone(), RECT { left, top, right: left + pv.size.0 as i32, bottom: top + pv.size.1 as i32 })
+            })
+            .collect();
+        list.sort_by_key(|(_, r)| r.left);
+        list
+    }
+
+    /// The bar's width, in DIPs.
+    pub fn width(&self) -> f32 {
+        (self.screen.right - self.screen.left) as f32 / self.scale
+    }
+
+    /// A pill's left and right edges, and the bar's bottom, in screen pixels; for a widget in a
+    /// `⋯` popup, its `⋯` pill's.
     pub fn pill_span(&self, key: &str) -> Option<(i32, i32, i32)> {
-        let pv = self.pills.get(key)?;
+        let pv = self.pills.get(key).or_else(|| self.pills.get(crate::fit::MORE[self.fit.hiding(key)?]))?;
         let mut r = RECT::default();
         unsafe { GetWindowRect(self.hwnd, &mut r).ok()? };
         let left = r.left + pv.x as i32;

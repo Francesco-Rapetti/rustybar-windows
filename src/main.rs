@@ -7,13 +7,20 @@
 mod app;
 mod bar;
 mod config;
+mod fit;
 mod gfx;
 mod i18n;
+mod ical;
 mod install;
+mod ipc;
 mod json;
 mod log;
+mod mock;
+mod net;
+mod palette;
 mod popup;
 mod process;
+mod secret;
 mod stats;
 mod theme;
 mod ui;
@@ -28,6 +35,29 @@ fn main() {
             std::process::exit(config::check());
         }
         Some("quit") => process::quit_running(),
+        Some("msg") => {
+            use std::io::Write;
+            process::attach_console();
+            // Not println!: on a closed pipe (`| select -First 1`) it would panic
+            let words = &args[1..];
+            if words.is_empty() {
+                let _ = writeln!(std::io::stdout(), "{}", app::USAGE);
+                std::process::exit(2);
+            }
+            match ipc::send(words) {
+                Ok(answer) => {
+                    let _ = writeln!(std::io::stdout(), "{}", answer.trim_end());
+                }
+                Err(e) => {
+                    let _ = writeln!(std::io::stderr(), "{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("secret") => {
+            process::attach_console();
+            std::process::exit(secret::command(&args[1..]));
+        }
         Some(command @ ("install" | "uninstall")) => {
             process::attach_console();
             std::process::exit(install::run(command, &args[1..]));

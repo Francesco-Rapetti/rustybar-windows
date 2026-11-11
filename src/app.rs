@@ -12,8 +12,8 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Instant, SystemTime};
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WPARAM};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
 use windows::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindCloseChangeNotification, FindFirstChangeNotificationW,
     FindNextChangeNotification,
@@ -26,11 +26,11 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Shell::{ABN_FULLSCREENAPP, ABN_POSCHANGED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, IsWindow, MSG,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetCursorPos, GetForegroundWindow, IsWindow, MSG,
     MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PM_REMOVE, PeekMessageW,
     PostQuitMessage, QS_ALLINPUT, RegisterClassExW, RegisterWindowMessageW, SPI_GETCLIENTAREAANIMATION,
     SPI_SETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SystemParametersInfoW,
-    TranslateMessage, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_DISPLAYCHANGE,
+    TranslateMessage, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_COPYDATA, WM_DISPLAYCHANGE,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_POWERBROADCAST, WM_QUIT, WM_SETTINGCHANGE, WM_TIMECHANGE, WNDCLASSEXW,
     WS_POPUP,
 };
@@ -39,11 +39,13 @@ use windows::core::{BOOL, HSTRING, PCWSTR, Result, w};
 use crate::bar::{self, Bar, Sides};
 use crate::config::{self, Config, Options};
 use crate::gfx::Gfx;
+use crate::ipc;
 use crate::log;
 use crate::popup::{Anchor, Popup, Side};
 use crate::process;
 use crate::theme::Theme;
-use crate::ui::{Measured, Text};
+use crate::fit::{self, Fitted, Form, Room};
+use crate::ui::{Align, Font, Item, Measured, Pill, Rect, Scene, Text, Weight};
 use crate::widgets::front_app::{self, Foreground, Names};
 use crate::widgets::{self, Input, Reply, Signal, Widget};
 
@@ -70,7 +72,17 @@ pub enum Event {
     AnimationsChanged,
     TimeChanged,
     Resume,
+    /// `rustybar msg`: the command's words, one a line, and the window to answer.
+    Command { text: String, reply: HWND },
 }
+
+/// What `rustybar msg` takes.
+pub const USAGE: &str = "usage: rustybar msg <command>
+  ping              answers pong if the bar runs
+  reload            reads the config again
+  query             the widgets, where their pills are, the screens
+  popup <widget>    opens the widget's popup, or closes it if it's open
+  quit              closes the bar";
 
 thread_local! {
     static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
@@ -110,7 +122,7 @@ pub struct App {
     control: HWND,
     hook: HWINEVENTHOOK,
     config_watch: Option<HANDLE>,
-    config_stamp: Option<(SystemTime, u64)>,
+    config_stamp: Stamp,
     names: Names,
     front: Foreground,
     game_in_front: bool,
@@ -313,7 +325,105 @@ impl App {
             Event::AnimationsChanged => self.system_animations = system_animations(),
             Event::TimeChanged => self.broadcast(&Signal::TimeChanged),
             Event::Resume => self.broadcast(&Signal::Resume),
+            Event::Command { text, reply } => {
+                let words: Vec<&str> = text.lines().collect();
+                let answer = self.command(&words);
+                ipc::answer(reply, self.control, &answer);
+            }
         }
+    }
+
+    /// A command of `rustybar msg`, and its answer.
+    fn command(&mut self, words: &[&str]) -> String {
+        match words {
+            ["ping"] => "pong".into(),
+            ["reload"] => match self.reload() {
+                Ok(()) => "ok".into(),
+                Err(e) => e,
+            },
+            ["query"] => {
+                // Up to date: the pills where they'll be
+                self.frame();
+                self.describe()
+            }
+            ["popup", name] => match self.toggle_popup(name) {
+                Ok(()) => "ok".into(),
+                Err(e) => e,
+            },
+            ["quit"] => {
+                unsafe { PostQuitMessage(0) };
+                "ok".into()
+            }
+            _ => USAGE.into(),
+        }
+    }
+
+    /// `rustybar msg query`: each widget with its kind, side and whether it shows a pill, then
+    /// each screen with where its pills are, in screen pixels.
+    fn describe(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let layout = &self.config.layout;
+        for (side, names) in [("left", &layout.left), ("center", &layout.center), ("right", &layout.right)] {
+            for name in names {
+                let Some(slot) = self.widgets.iter().find(|s| &s.name == name) else {
+                    let _ = writeln!(out, "{name:<16} {:<12} {side:<7} unknown", "?");
+                    continue;
+                };
+                let kind = config::widget_kind(&self.config, name);
+                let shown = if slot.widget.pill(&self.theme).is_some() { "shown" } else { "hidden" };
+                let popup = if self.popup.as_ref().is_some_and(|p| &p.widget == name) { "  popup open" } else { "" };
+                let _ = writeln!(out, "{name:<16} {kind:<12} {side:<7} {shown}{popup}");
+            }
+        }
+        for bar in &self.bars {
+            let s = bar.screen;
+            let state = if bar.visible { "shown" } else { "hidden (full screen app)" };
+            let _ = writeln!(out, "screen {}x{} at {},{}, scale {:.2}: {state}", s.right - s.left, s.bottom - s.top, s.left, s.top, bar.scale);
+            for (name, r) in bar.pill_rects() {
+                let _ = writeln!(out, "  {name:<16} {},{} {}x{}", r.left, r.top, r.right - r.left, r.bottom - r.top);
+            }
+            if !bar.fit.compact.is_empty() {
+                let _ = writeln!(out, "  compact: {}", bar.fit.compact.join(", "));
+            }
+            for (side, hidden) in fit::MORE.iter().zip(&bar.fit.hidden) {
+                if !hidden.is_empty() {
+                    let _ = writeln!(out, "  in {side}: {}", hidden.join(", "));
+                }
+            }
+        }
+        let _ = write!(out, "game in front: {}", if self.game_in_front { "yes" } else { "no" });
+        out
+    }
+
+    /// `rustybar msg popup <name>`: opens the widget's popup under its pill on the screen with the
+    /// mouse (or the first screen that shows it), or closes it if it's open.
+    fn toggle_popup(&mut self, name: &str) -> std::result::Result<(), String> {
+        // A `⋯` pill's popup too, by its name (`⋯left`, `⋯right`)
+        if fit::more_side(name).is_none() {
+            let Some(slot) = self.widgets.iter().find(|s| s.name == name) else {
+                return Err(format!("unknown widget {name:?}"));
+            };
+            if !slot.widget.has_popup() {
+                return Err(format!("{name} has no popup"));
+            }
+        }
+        if self.popup.as_ref().is_some_and(|p| p.widget == name) {
+            self.close_popup(true);
+            return Ok(());
+        }
+        self.frame();
+        let mut cursor = POINT::default();
+        let here = unsafe { GetCursorPos(&mut cursor) }.ok().map(|()| unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) });
+        let shows = |b: &Bar| b.visible && b.pill_span(name).is_some();
+        let index = self
+            .bars
+            .iter()
+            .position(|b| Some(b.monitor) == here && shows(b))
+            .or_else(|| self.bars.iter().position(shows))
+            .ok_or_else(|| format!("{name} shows no pill on any screen"))?;
+        self.open_popup(name, index);
+        Ok(())
     }
 
     fn broadcast(&mut self, signal: &Signal) {
@@ -327,7 +437,8 @@ impl App {
     /// The widget in slot `i` changed: its pill, and its popup if it's open.
     fn changed(&mut self, i: usize) {
         self.dirty = true;
-        if self.popup.as_ref().is_some_and(|p| p.widget == self.widgets[i].name) {
+        // A `⋯` popup may show its pill
+        if self.popup.as_ref().is_some_and(|p| p.widget == self.widgets[i].name || fit::more_side(&p.widget).is_some()) {
             self.popup_dirty = true;
         }
     }
@@ -456,6 +567,102 @@ impl App {
         sides
     }
 
+    /// What each bar shows: the pills in the forms that fit it (see `fit`), with a `⋯` pill for the
+    /// widgets of a side that don't. A bar where everything fits in full, as usual on a wide
+    /// screen, costs a sum; the compact pills are measured only while some bar needs them.
+    fn fit_bars(&mut self, full: Sides) -> Vec<Sides> {
+        let (margin, gap) = (self.config.bar.margin, self.theme.item_gap);
+        let fits_full = |bar: &Bar| {
+            let room = room(bar.width(), &full, total(full.center.iter().map(|m| m.width), gap), margin, gap);
+            bar.fit.full() && fit::fits(room, (total(full.left.iter().map(|m| m.width), gap), total(full.right.iter().map(|m| m.width), gap)), 0.0)
+        };
+        if self.bars.iter().all(fits_full) {
+            for bar in &mut self.bars {
+                bar.fit = fit::Fitted::default();
+            }
+            return self.bars.iter().map(|_| full.clone()).collect();
+        }
+        let compact = self.measure_compact(&full);
+        let more = [self.measure_more(0), self.measure_more(1)];
+        let [Some(left), Some(right)] = more else { return self.bars.iter().map(|_| full.clone()).collect() };
+        let more = [left, right];
+        self.bars.iter_mut().map(|bar| fit_bar(bar.width(), &mut bar.fit, &full, &compact, &more, margin, gap)).collect()
+    }
+
+    /// The compact pills of the widgets that have one narrower than their own, by name.
+    fn measure_compact(&mut self, full: &Sides) -> HashMap<String, Measured> {
+        let mut out = HashMap::new();
+        for m in full.left.iter().chain(&full.center).chain(&full.right) {
+            let Some(slot) = self.widgets.iter().find(|s| s.name == m.key) else { continue };
+            let Some(pill) = slot.widget.compact(&self.theme).filter(|p| *p != m.pill) else { continue };
+            let key = format!("{}\u{0}compact", m.key);
+            let measured = match self.measured.get(&key).filter(|c| c.pill == pill) {
+                Some(c) => c.clone(),
+                None => match self.text.measure(&m.key, pill, &self.theme) {
+                    Ok(c) => {
+                        self.measured.insert(key, c.clone());
+                        c
+                    }
+                    Err(e) => {
+                        log!("{}: {e}", m.key);
+                        continue;
+                    }
+                },
+            };
+            if measured.width < m.width {
+                out.insert(m.key.clone(), measured);
+            }
+        }
+        out
+    }
+
+    /// The `⋯` pill of a side.
+    fn measure_more(&mut self, side: usize) -> Option<Measured> {
+        let name = fit::MORE[side];
+        let pill = Pill::new(vec![Item::icon(MORE_ICON, self.theme.text)]);
+        if let Some(m) = self.measured.get(name).filter(|m| m.pill == pill) {
+            return Some(m.clone());
+        }
+        let m = self.text.measure(name, pill, &self.theme).map_err(|e| log!("{name}: {e}")).ok()?;
+        self.measured.insert(name.to_string(), m.clone());
+        Some(m)
+    }
+
+    /// The popup of a `⋯` pill: the pills of the widgets of its side that bar `bar` has no room
+    /// for, in their full form, one under the other, lined up on that side. A click on one opens
+    /// its popup from the `⋯` pill, or does what a click on it in the bar does.
+    fn more_scene(&self, bar: usize, side: usize) -> Option<Scene> {
+        const PAD: f32 = 8.0;
+        let t = &self.theme;
+        let pills: Vec<&Measured> = self.bars.get(bar)?.fit.hidden[side].iter().filter_map(|n| self.measured.get(n)).collect();
+        if pills.is_empty() {
+            return None;
+        }
+        let inner = pills.iter().map(|m| m.width).fold(0.0, f32::max);
+        let gap = t.item_gap.max(6.0);
+        let height = 2.0 * PAD + pills.len() as f32 * t.pill_height + gap * (pills.len() - 1) as f32;
+        let mut scene = Scene::new(inner + 2.0 * PAD, height);
+        let mut y = PAD;
+        for m in pills {
+            let x = if side == 0 { PAD } else { PAD + inner - m.width };
+            pill_shapes(&mut scene, t, m, x, y);
+            let r = Rect::new(x, y, m.width, t.pill_height);
+            match self.widgets.iter().find(|s| s.name == m.key) {
+                Some(slot) if slot.widget.has_popup() => scene.zone(r, t.pill_radius, format!("open:{}", m.key)),
+                // Each item, half the gap on either side, as in the bar
+                Some(slot) if slot.widget.clickable() => {
+                    for (i, p) in m.items.iter().enumerate() {
+                        let item = Rect::new(x + p.x - m.pill.gap / 2.0, y, p.width + m.pill.gap, t.pill_height);
+                        scene.zone(item, t.pill_radius, format!("click:{i}:{}", m.key));
+                    }
+                }
+                _ => {}
+            }
+            y += t.pill_height + gap;
+        }
+        Some(scene)
+    }
+
     /// Brings every bar, and the open popup, up to date if something changed.
     fn frame(&mut self) {
         if self.dirty && self.gfx.is_some() {
@@ -470,12 +677,17 @@ impl App {
 
     /// Draws what changed in the bars and hands it to DWM at once.
     fn render_bars(&mut self) {
-        let sides = self.measure();
+        let full = self.measure();
+        let sides = self.fit_bars(full);
         let animate = self.animate();
         let Some(gfx) = &self.gfx else { return };
         let mut result = Ok(());
-        for bar in &mut self.bars {
-            result = result.and(bar.render(gfx, &self.theme, &sides, self.config.bar.margin, animate));
+        for (bar, sides) in self.bars.iter_mut().zip(&sides) {
+            result = result.and(bar.render(gfx, &self.theme, sides, self.config.bar.margin, animate));
+        }
+        // What a `⋯` popup has may have changed with the bar
+        if self.popup.as_ref().is_some_and(|p| fit::more_side(&p.widget).is_some()) {
+            self.popup_dirty = true;
         }
         let result = result.and(gfx.commit());
         match result {
@@ -542,6 +754,10 @@ impl App {
             self.close_popup(true);
             return;
         };
+        if fit::more_side(&name).is_some() {
+            self.open_popup(&name, index);
+            return;
+        }
         let Some(i) = self.widgets.iter().position(|s| s.name == name) else { return };
         if self.widgets[i].widget.has_popup() {
             self.open_popup(&name, index);
@@ -556,6 +772,9 @@ impl App {
 
     fn side_of(&self, name: &str) -> Side {
         let layout = &self.config.layout;
+        if let Some(side) = fit::more_side(name) {
+            return if side == 0 { Side::Left } else { Side::Right };
+        }
         if layout.left.iter().any(|n| n == name) {
             Side::Left
         } else if layout.center.iter().any(|n| n == name) {
@@ -591,6 +810,21 @@ impl App {
         };
         let bar_hwnd = bar.hwnd;
         let Some(gfx) = &self.gfx else { return };
+        if let Some(side) = fit::more_side(name) {
+            let opened = Popup::new(name, bar_hwnd, previous, anchor, s, &self.theme).and_then(|mut popup| match self.more_scene(index, side) {
+                Some(scene) => {
+                    popup.render(gfx, &self.theme, scene)?;
+                    popup.show(gfx, animate)?;
+                    Ok(Some(popup))
+                }
+                None => Ok(None),
+            });
+            match opened {
+                Ok(popup) => self.popup = popup,
+                Err(e) => log!("{name}: popup: {e}"),
+            }
+            return;
+        }
         let Some(slot) = self.widgets.iter_mut().find(|s| s.name == name) else { return };
         let theme = &self.theme;
         slot.widget.popup_shown(true);
@@ -667,10 +901,20 @@ impl App {
     /// Makes the open popup's scene again and draws it if it changed; None from the widget
     /// closes the popup.
     fn render_popup(&mut self) {
+        let Some(popup) = &self.popup else { return };
+        let scene = match fit::more_side(&popup.widget) {
+            Some(side) => {
+                let bar = self.bars.iter().position(|b| b.hwnd == popup.bar);
+                bar.and_then(|b| self.more_scene(b, side))
+            }
+            None => {
+                let Some(slot) = self.widgets.iter().find(|s| s.name == popup.widget) else { return };
+                slot.widget.popup(&self.theme, &popup.fonts)
+            }
+        };
         let Some(popup) = &mut self.popup else { return };
         let Some(gfx) = &self.gfx else { return };
-        let Some(slot) = self.widgets.iter().find(|s| s.name == popup.widget) else { return };
-        let result = match slot.widget.popup(&self.theme, &popup.fonts) {
+        let result = match scene {
             Some(scene) => popup.render(gfx, &self.theme, scene).and_then(|()| gfx.commit()),
             None => {
                 self.close_popup(true);
@@ -713,6 +957,10 @@ impl App {
     /// Hands an input to the open popup's widget and does what it replies.
     fn popup_input(&mut self, input: &Input) {
         let Some(name) = self.popup.as_ref().map(|p| p.widget.clone()) else { return };
+        if fit::more_side(&name).is_some() {
+            self.more_input(input);
+            return;
+        }
         let Some(slot) = self.widgets.iter_mut().find(|s| s.name == name) else { return };
         match slot.widget.popup_input(input) {
             Reply::Nothing => {}
@@ -723,6 +971,25 @@ impl App {
             }
             Reply::Close => self.close_popup(true),
             Reply::Opened => self.close_popup(false),
+        }
+    }
+
+    /// A click in a `⋯` popup: on a widget with a popup, its popup, from the `⋯` pill; on one
+    /// without, what a click on its pill in the bar does.
+    fn more_input(&mut self, input: &Input) {
+        let Input::Action(action) = input else { return };
+        let Some(index) = self.popup.as_ref().and_then(|p| self.bars.iter().position(|b| b.hwnd == p.bar)) else { return };
+        if let Some(widget) = action.strip_prefix("open:") {
+            let widget = widget.to_string();
+            self.open_popup(&widget, index);
+        } else if let Some((item, widget)) = action.strip_prefix("click:").and_then(|r| r.split_once(':')) {
+            let (Ok(item), widget) = (item.parse::<usize>(), widget.to_string()) else { return };
+            self.close_popup(true);
+            if let Some(i) = self.widgets.iter().position(|s| s.name == widget)
+                && self.widgets[i].widget.click(Some(item))
+            {
+                self.changed(i);
+            }
         }
     }
 
@@ -739,10 +1006,16 @@ impl App {
             return;
         }
         self.config_stamp = stamp;
+        let _ = self.reload();
+    }
+
+    /// Everything starts again from the config files, but the bars, which only move when `[bar]`
+    /// changed. A config that can't be read leaves the bar as it was.
+    fn reload(&mut self) -> std::result::Result<(), String> {
         let (config, error) = config::load();
-        if let Some(e) = &error {
+        if let Some(e) = error {
             log!("config: {e}");
-            return;
+            return Err(e);
         }
         log!("config reloaded");
         self.drop_popups();
@@ -771,6 +1044,7 @@ impl App {
         }
         self.update_visibility();
         self.dirty = true;
+        Ok(())
     }
 }
 
@@ -790,6 +1064,126 @@ impl Drop for App {
 }
 
 /// The widgets of `[layout]`, in order, each name once.
+/// The `⋯` pill's icon (Segoe Fluent Icons' «More»).
+const MORE_ICON: &str = "\u{E712}";
+
+/// How wide pills are side by side, `gap` apart.
+fn total(widths: impl Iterator<Item = f32>, gap: f32) -> f32 {
+    let (n, sum) = widths.fold((0usize, 0.0), |(n, s), w| (n + 1, s + w));
+    sum + gap * n.saturating_sub(1) as f32
+}
+
+/// The room the sides have in a bar `width` DIPs wide: each its own beside the center group,
+/// `center` wide, or together without one.
+fn room(width: f32, sides: &Sides, center: f32, margin: f32, gap: f32) -> Room {
+    if sides.center.is_empty() {
+        Room::Shared(width - 2.0 * margin - gap)
+    } else {
+        let side = (width - center) / 2.0 - margin - gap;
+        Room::Split { left: side, right: side }
+    }
+}
+
+/// The pills of a bar `width` DIPs wide in the forms that fit it: the center group turns compact
+/// first, when the sides don't fit beside it in full; then the sides give way (see `fit`). `state`
+/// is the bar's last fit, and becomes this one.
+fn fit_bar(width: f32, state: &mut Fitted, full: &Sides, compact: &HashMap<String, Measured>, more: &[Measured; 2], margin: f32, gap: f32) -> Sides {
+    // A widget's compact pill, or its own if it has none
+    fn small<'a>(compact: &'a HashMap<String, Measured>, m: &'a Measured) -> &'a Measured {
+        compact.get(&m.key).unwrap_or(m)
+    }
+    let center = |c: bool| total(full.center.iter().map(|m| if c { small(compact, m).width } else { m.width }), gap);
+    let sides_full = (total(full.left.iter().map(|m| m.width), gap), total(full.right.iter().map(|m| m.width), gap));
+    let slack = if state.center_compact { fit::SLACK } else { 0.0 };
+    let center_compact =
+        full.center.iter().any(|m| compact.contains_key(&m.key)) && !fit::fits(room(width, full, center(false), margin, gap), sides_full, slack);
+    let room = room(width, full, center(center_compact), margin, gap);
+
+    let pills: Vec<(bool, &Measured)> = full.left.iter().map(|m| (true, m)).chain(full.right.iter().map(|m| (false, m))).collect();
+    let (lefts, rights) = (full.left.len(), full.right.len());
+    let items: Vec<fit::Item> = pills
+        .iter()
+        .enumerate()
+        .map(|(i, &(left, m))| fit::Item { left, rank: if left { i } else { rights - 1 - (i - lefts) }, compact: compact.contains_key(&m.key) })
+        .collect();
+    let measure = |forms: &[Form]| {
+        // Each side: how many pills, how wide, and whether one went to its `⋯`
+        let mut sides = [(0usize, 0f32, false); 2];
+        for (&(left, m), form) in pills.iter().zip(forms) {
+            let s = &mut sides[usize::from(!left)];
+            match form {
+                Form::Full => (s.0, s.1) = (s.0 + 1, s.1 + m.width),
+                Form::Compact => (s.0, s.1) = (s.0 + 1, s.1 + small(compact, m).width),
+                Form::Hidden => s.2 = true,
+            }
+        }
+        let side = |k: usize| {
+            let (n, w, hidden) = sides[k];
+            let (n, w) = if hidden { (n + 1, w + more[k].width) } else { (n, w) };
+            w + gap * n.saturating_sub(1) as f32
+        };
+        (side(0), side(1))
+    };
+    let (levels, forms) = fit::fit(&items, room, &state.levels, measure);
+
+    let mut out = Sides { left: Vec::new(), center: Vec::new(), right: Vec::new() };
+    let mut next = Fitted { levels, center_compact, ..Fitted::default() };
+    for (&(left, m), form) in pills.iter().zip(&forms) {
+        let (list, k) = if left { (&mut out.left, 0) } else { (&mut out.right, 1) };
+        match form {
+            Form::Full => list.push(m.clone()),
+            Form::Compact => {
+                list.push(small(compact, m).clone());
+                next.compact.push(m.key.clone());
+            }
+            Form::Hidden => next.hidden[k].push(m.key.clone()),
+        }
+    }
+    // A `⋯` at the inner end of its side, where the widgets that went were
+    if !next.hidden[0].is_empty() {
+        out.left.push(more[0].clone());
+    }
+    if !next.hidden[1].is_empty() {
+        out.right.insert(0, more[1].clone());
+    }
+    for m in &full.center {
+        if center_compact && compact.contains_key(&m.key) {
+            out.center.push(small(compact, m).clone());
+            next.compact.push(m.key.clone());
+        } else {
+            out.center.push(m.clone());
+        }
+    }
+    *state = next;
+    out
+}
+
+/// A pill as the bar draws it, at `x`, `y` in a popup's scene: background and border, the
+/// highlight, the text.
+fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
+    let b = t.pill_border;
+    if b > 0.0 {
+        scene.fill(Rect::new(x, y, m.width, t.pill_height), t.pill_radius, t.surface);
+        scene.fill(Rect::new(x + b, y + b, m.width - 2.0 * b, t.pill_height - 2.0 * b), (t.pill_radius - b).max(0.0), t.base);
+    } else {
+        scene.fill(Rect::new(x, y, m.width, t.pill_height), t.pill_radius, t.base);
+    }
+    if let Some(p) = m.pill.highlight.and_then(|i| m.items.get(i)) {
+        let h = t.pill_height - 2.0 * bar::HIGHLIGHT_Y;
+        scene.fill(Rect::new(x + p.x - bar::HIGHLIGHT_X, y + bar::HIGHLIGHT_Y, p.width + 2.0 * bar::HIGHLIGHT_X, h), h / 2.0, t.primary);
+    }
+    for (item, p) in m.pill.items.iter().zip(&m.items) {
+        let font = if item.icon {
+            Font::icons(t.font_size + 1.0)
+        } else if item.small {
+            Font::new(t.small_size, Weight::Medium)
+        } else {
+            Font::new(t.font_size, Weight::SemiBold)
+        };
+        scene.text(Rect::new(x + p.x + p.text_x, y, p.width - p.text_x + 1.0, t.pill_height), item.text.as_str(), font, item.color, Align::Start);
+    }
+}
+
 fn make_widgets(config: &Config) -> Vec<Slot> {
     let mut slots: Vec<Slot> = Vec::new();
     let names = config.layout.left.iter().chain(&config.layout.center).chain(&config.layout.right);
@@ -845,9 +1239,16 @@ fn watch_config_dir() -> Option<HANDLE> {
     }
 }
 
-fn config_stamp() -> Option<(SystemTime, u64)> {
-    let m = std::fs::metadata(config::file()).ok()?;
-    Some((m.modified().ok()?, m.len()))
+/// When the config files were written, and how long they are: `rustybar.toml` and
+/// `rustybar.local.toml`. The dir's watch fires for any file in it; this tells theirs apart.
+type Stamp = [Option<(SystemTime, u64)>; 2];
+
+fn config_stamp() -> Stamp {
+    let stamp = |path: std::path::PathBuf| {
+        let m = std::fs::metadata(path).ok()?;
+        Some((m.modified().ok()?, m.len()))
+    };
+    [stamp(config::file()), stamp(config::local_file())]
 }
 
 unsafe extern "system" fn on_winevent(_: HWINEVENTHOOK, event: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {
@@ -876,6 +1277,16 @@ unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                 push(Event::Resume);
             }
             return LRESULT(1);
+        }
+        WM_COPYDATA => {
+            // `rustybar msg`: wparam is the window to answer
+            return match unsafe { ipc::read(lparam) } {
+                Some(text) => {
+                    push(Event::Command { text, reply: HWND(wparam.0 as *mut c_void) });
+                    LRESULT(1)
+                }
+                None => LRESULT(0),
+            };
         }
         WM_CLOSE => unsafe { PostQuitMessage(0) },
         WM_ENDSESSION if wparam.0 != 0 => unsafe { PostQuitMessage(0) },

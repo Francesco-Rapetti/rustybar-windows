@@ -408,6 +408,16 @@ impl super::Widget for Audio {
         Some(Pill::new(items).gap(6.0))
     }
 
+    /// The icons alone: the output's, and its battery's.
+    fn compact(&self, theme: &Theme) -> Option<Pill> {
+        let out = self.output.as_ref()?;
+        let mut items = vec![Item::icon(output_icon(out), if out.muted { theme.subtext } else { theme.text })];
+        if let Some(b) = out.battery {
+            items.push(Item::icon(battery_icon(b), battery_color(theme, b, theme.subtext)));
+        }
+        Some(Pill::new(items).gap(8.0))
+    }
+
     fn handles(&self) -> Vec<HANDLE> {
         self.wake.handle().into_iter().chain(self.battery_timer.handle()).collect()
     }
@@ -658,13 +668,21 @@ fn output_icon(e: &Endpoint) -> &'static str {
     }
     match e.device.form {
         3 | 5 | 9 | 2 | 8 => kind_icon(e.device.form),
-        _ => SPEAKER[match e.percent() {
-            0 => 0,
-            1..=33 => 1,
-            34..=66 => 2,
-            _ => 3,
-        }],
+        _ => speaker(e.percent(), false),
     }
+}
+
+/// A speaker for a volume: crossed out when muted, else with as many waves as the level has.
+pub fn speaker(percent: u32, muted: bool) -> &'static str {
+    if muted {
+        return MUTED;
+    }
+    SPEAKER[match percent {
+        0 => 0,
+        1..=33 => 1,
+        34..=66 => 2,
+        _ => 3,
+    }]
 }
 
 fn kind_icon(form: u32) -> &'static str {

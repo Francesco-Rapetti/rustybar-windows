@@ -1,6 +1,8 @@
 //! `rustybar.toml` in the config dir (`%APPDATA%\rustybar`, or `RUSTYBAR_CONFIG_DIR`). Every key
 //! has a default, so a missing file or a missing key is fine; the bar reloads by itself when the
-//! file is saved.
+//! file is saved. `rustybar.local.toml` beside it, if there is one, goes over it: its tables merge
+//! key by key, any other value replaces the one of `rustybar.toml` (what to keep out of a shared
+//! dotfiles repo, such as a server or the accounts).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -94,7 +96,7 @@ pub struct Layout {
 impl Default for Layout {
     fn default() -> Self {
         Layout {
-            left: vec!["workspaces".into(), "front_app".into()],
+            left: vec!["power".into(), "workspaces".into(), "front_app".into()],
             center: vec!["media".into()],
             right: vec!["network".into(), "audio".into(), "system".into(), "clock".into()],
         }
@@ -127,17 +129,49 @@ pub fn file() -> PathBuf {
     dir().join("rustybar.toml")
 }
 
-/// The config, or the defaults with the reason the file couldn't be used.
+/// What to keep out of a shared `rustybar.toml` (a server, accounts), merged over it.
+pub fn local_file() -> PathBuf {
+    dir().join("rustybar.local.toml")
+}
+
+/// The config, or the defaults with the reason the files couldn't be used.
 pub fn load() -> (Config, Option<String>) {
-    let path = file();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Config::default(), None),
-        Err(e) => return (Config::default(), Some(format!("{}: {e}", path.display()))),
-    };
-    match toml::from_str::<Config>(&text) {
+    match read() {
         Ok(config) => (config, None),
-        Err(e) => (Config::default(), Some(format!("{}: {e}", path.display()))),
+        Err(e) => (Config::default(), Some(e)),
+    }
+}
+
+/// A file's text, or None if there's no such file.
+fn text_of(path: &std::path::Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// `rustybar.toml` with `rustybar.local.toml` over it, if there is one.
+fn read() -> Result<Config, String> {
+    let (path, local) = (file(), local_file());
+    let text = text_of(&path)?.unwrap_or_default();
+    let Some(more) = text_of(&local)? else {
+        return toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()));
+    };
+    let mut table: toml::Table = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
+    merge(&mut table, more.parse().map_err(|e| format!("{}: {e}", local.display()))?);
+    toml::Value::Table(table).try_into().map_err(|e: toml::de::Error| format!("{} + {}: {e}", path.display(), local.display()))
+}
+
+/// Puts `more` over `base`: tables merge key by key, anything else (arrays too) is replaced.
+pub fn merge(base: &mut toml::Table, more: toml::Table) {
+    for (key, value) in more {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(m)) => merge(b, m),
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
     }
 }
 
@@ -155,7 +189,12 @@ pub fn check() -> i32 {
         }
     }
     if problems.is_empty() {
-        println!("{}: ok", file().display());
+        let local = local_file();
+        if local.exists() {
+            println!("{} + {}: ok", file().display(), local.display());
+        } else {
+            println!("{}: ok", file().display());
+        }
         0
     } else {
         for p in &problems {
@@ -191,5 +230,21 @@ impl Options {
 
     pub fn bool(&self, key: &str) -> Option<bool> {
         self.0.get(key).and_then(|v| v.as_bool())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_goes_over() {
+        let mut base: toml::Table = "[bar]\nheight = 36\n[layout]\nright = [\"clock\"]\n[widgets.claude]\ncolor = \"red\"\nwarning = 70".parse().unwrap();
+        merge(&mut base, "[layout]\nright = [\"claude\", \"clock\"]\n[widgets.claude]\ndir = \"~/.claude-work\"".parse().unwrap());
+        let config: Config = toml::Value::Table(base).try_into().unwrap();
+        assert_eq!(config.bar.height, 36.0);
+        assert_eq!(config.layout.right, ["claude", "clock"]);
+        let claude = Options(config.widgets["claude"].clone());
+        assert_eq!((claude.str("color"), claude.str("dir"), claude.f64("warning")), (Some("red"), Some("~/.claude-work"), Some(70.0)));
     }
 }

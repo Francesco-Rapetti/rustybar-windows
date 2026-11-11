@@ -116,6 +116,10 @@ impl super::Widget for Workspaces {
         self.key.map(|_| self.event)
     }
 
+    fn clickable(&self) -> bool {
+        true
+    }
+
     /// A click on a desktop goes there, with Windows' own shortcut: Ctrl+Win+← or → as many
     /// times as there are desktops in between, sent in one go so the user's typing can't get in
     /// the middle. Nothing while a listed game is in front: the keys are simulated, and an

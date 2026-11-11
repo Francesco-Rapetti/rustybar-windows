@@ -311,6 +311,18 @@ impl super::Widget for System {
         Some(Pill::new(items).gap(4.0))
     }
 
+    /// The memory alone, as the macOS RustyBar's compact form.
+    fn compact(&self, theme: &Theme) -> Option<Pill> {
+        let ram = self.ram();
+        let color = match ram {
+            _ if self.paused() => theme.subtext,
+            Some(v) => self.level(theme, v, theme.text),
+            None => theme.subtext,
+        };
+        let value = Item::text(ram.map_or("–".to_string(), |v| format!("{v}%")), color).fixed("100%");
+        Some(Pill::new(vec![Item::text("RAM", theme.subtext).small(), value]).gap(4.0))
+    }
+
     fn handle(&self) -> Option<HANDLE> {
         self.period.map(|_| self.timer)
     }
