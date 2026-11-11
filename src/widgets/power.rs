@@ -1,5 +1,6 @@
-//! The power menu: the power button in the bar, and in its popup what the Start menu's power
-//! button and the Win+X menu do, with the same words, as the Apple menu of the macOS version. About
+//! The power menu: the Windows logo in the bar (its four squares, drawn: see `ui::logo`), and in
+//! its popup what the Start menu's power button and the Win+X menu do, with the same words, as the
+//! Apple menu of the macOS version. About
 //! this PC; Task Manager and Settings; Sleep, Restart and Shut down; Lock and Sign out (with the
 //! account's name); last the config of RustyBar.
 //!
@@ -107,7 +108,7 @@ impl Power {
 
 impl super::Widget for Power {
     fn pill(&self, theme: &Theme) -> Option<Pill> {
-        Some(Pill::new(vec![Item::icon(POWER, theme.text)]))
+        Some(Pill::new(vec![Item::windows_logo(theme.text)]))
     }
 
     fn has_popup(&self) -> bool {

@@ -530,8 +530,13 @@ decisione) e il Wi-Fi acceso e spento, di `audio` il collegamento dei dispositiv
   non costano nulla. Per distinguere i due orologi un testo fra apici nella data: `date = "'Tokyo'"`.
   Calendario, «Oggi» e mezzanotte nel fuso dell'orologio.
 - `power` (fatto, confermato con l'utente col mockup: secondo clic, nome dell'account, primo a
-  sinistra nel layout predefinito): pill con l'icona del tasto d'accensione (`E7E8`; Segoe Fluent
-  Icons non ha il logo di Windows, che è comunque un marchio). Popup a menu (righe di 32 DIP,
+  sinistra nel layout predefinito): pill col logo di Windows nel colore del testo, come la mela
+  su macOS (chiesto dall'utente l'11/11/2026 al posto del tasto d'accensione `E7E8`). Nessun font
+  di sistema lo ha (Segoe Fluent Icons no, Wingdings solo la vecchia bandiera), quindi lo si
+  disegna: `Item::windows_logo` (misurato come il glifo `E8A9` della stessa misura) e
+  `ui::logo`, quattro quadrati grandi quanto `font_size`, uno spazio di 1/12 (almeno 1 px),
+  allineati ai pixel a ogni scala; disegnati in `bar::draw_text` e nel popup ⋯. Nessuna
+  immagine del marchio nella repo. Popup a menu (righe di 32 DIP,
   icona, testo, scorciatoia in `subtext` a destra; largo quanto serve, almeno 240): «Informazioni
   su questo PC» (`ms-settings:about`) | «Gestione attività» Ctrl+Maiusc+Esc (`taskmgr.exe`),
   «Impostazioni» Win+I (`ms-settings:`) | «Sospendi» (`SetSuspendState` su un thread dopo 0,3 s:
@@ -836,3 +841,8 @@ la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
   `power`, `front_app`, `workspaces`, `media`) e screenshot dei popup disegnati fuori schermo
   (mai una cattura dello schermo dell'utente), poi Lua e la finestra delle impostazioni (da
   decidere con l'utente).
+- 11/11/2026, **logo di Windows in `power`** (chiesto dall'utente): quattro quadrati disegnati
+  (`ui::logo`), visti ingranditi sulla barra di prova (6 px con 1 px di spazio al 100%, netti e
+  centrati); installata la barra nuova e aggiunto `power` in testa a sinistra nella config vera
+  dell'utente (ricaricata da sola, `msg query` lo mostra). Non visto: le scale 125–200% a occhio
+  (il test controlla i pixel).

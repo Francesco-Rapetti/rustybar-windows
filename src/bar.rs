@@ -508,6 +508,12 @@ fn draw_text(surface: &IDCompositionSurface, s: f32, theme: &Theme, m: &Measured
         for (item, placed) in m.pill.items.iter().zip(&m.items) {
             brush.SetColor(&gfx::color(item.color));
             let x = placed.x + placed.text_x;
+            if item.logo {
+                for r in crate::ui::logo(x, 0.0, placed.width - placed.text_x, height, theme.font_size, s) {
+                    ctx.FillRectangle(&gfx::rect(r.x, r.y, r.w, r.h), brush);
+                }
+                continue;
+            }
             // Snapped to whole pixels: text between pixels looks blurred
             let y = ((height - placed.text_height) / 2.0 * s).round() / s;
             ctx.DrawTextLayout(Vector2 { X: (x * s).round() / s, Y: y }, &placed.layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);

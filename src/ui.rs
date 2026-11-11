@@ -32,16 +32,24 @@ pub struct Item {
     pub space: Option<f32>,
     /// A glyph of Windows' icon font (Segoe Fluent Icons) instead of text.
     pub icon: bool,
+    /// The Windows logo, drawn as its four squares in the room of an icon (no font has it).
+    pub logo: bool,
 }
 
 impl Item {
     pub fn text(text: impl Into<String>, color: Rgba) -> Item {
-        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false }
+        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false }
     }
 
     /// An icon: a glyph of Segoe Fluent Icons (`"\u{E767}"`, the speaker).
     pub fn icon(glyph: &str, color: Rgba) -> Item {
         Item { icon: true, ..Item::text(glyph, color) }
+    }
+
+    /// The Windows logo, in the room of an icon (measured as a four-square glyph of the same
+    /// size), as the macOS RustyBar has Apple's.
+    pub fn windows_logo(color: Rgba) -> Item {
+        Item { logo: true, ..Item::icon("\u{E8A9}", color) }
     }
 
     /// In the theme's small font.
@@ -212,13 +220,27 @@ impl Text {
                     (width, (width - text_width) / 2.0)
                 }
             };
-            (item.text.as_str(), item.color.bits(), item.small, item.icon, width.to_bits(), text_x.to_bits()).hash(&mut h);
+            (item.text.as_str(), item.color.bits(), item.small, item.icon, item.logo, width.to_bits(), text_x.to_bits()).hash(&mut h);
             items.push(Placed { x, width, text_x, text_height, layout });
             x += width;
         }
         let width = (x + theme.pill_padding).ceil();
         Ok(Measured { key: key.to_string(), pill, width, items, text_sig: h.finish() })
     }
+}
+
+/// The Windows logo's four squares, `size` DIPs on a side, centered in the box `x`, `y`, `w`, `h`
+/// and lined up with the pixels at `scale`, so its edges and the gaps between the squares stay
+/// sharp.
+pub fn logo(x: f32, y: f32, w: f32, h: f32, size: f32, scale: f32) -> [Rect; 4] {
+    let side = (size * scale).round().max(3.0);
+    let gap = (side / 12.0).round().max(1.0);
+    let square = ((side - gap) / 2.0).floor();
+    let side = 2.0 * square + gap;
+    let left = ((x + (w - side / scale) / 2.0) * scale).round();
+    let top = ((y + (h - side / scale) / 2.0) * scale).round();
+    let at = |col: f32, row: f32| Rect::new((left + col * (square + gap)) / scale, (top + row * (square + gap)) / scale, square / scale, square / scale);
+    [at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0), at(1.0, 1.0)]
 }
 
 // ---- popups ------------------------------------------------------------------------------------
@@ -504,6 +526,23 @@ fn has_family(factory: &IDWriteFactory, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Four equal squares on whole pixels, a gap between them, centered in the box.
+    #[test]
+    fn the_windows_logo() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let [a, b, c, d] = logo(10.0, 0.0, 20.0, 28.0, 13.0, scale);
+            for r in [a, b, c, d] {
+                assert_eq!((r.w, r.w * scale), (a.w, (a.w * scale).round()), "{scale}");
+                assert_eq!(r.x * scale, (r.x * scale).round());
+                assert_eq!(r.y * scale, (r.y * scale).round());
+            }
+            assert!(b.x > a.x + a.w && c.y > a.y + a.h, "{scale}");
+            assert_eq!((b.y, c.x, d.x, d.y), (a.y, a.x, b.x, c.y));
+            let center = (a.x + d.x + d.w) / 2.0;
+            assert!((center - 20.0).abs() <= 1.0 / scale, "{scale}: {center}");
+        }
+    }
 
     #[test]
     fn zones_and_signatures() {

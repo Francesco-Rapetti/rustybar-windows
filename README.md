@@ -138,7 +138,8 @@ and what's in `⋯`, and `rustybar msg popup ⋯left` (or `⋯right`) opens that
   in it, `""` for days that can't be clicked; `timezone`, for a clock of another place, by its
   IANA name (`Asia/Tokyo`, `UTC`) or Windows' (`Tokyo Standard Time`), with daylight saving time
   as Windows has it.
-- **power**: the power button. Its popup is the menu of Start's power button and of Win+X:
+- **power**: the Windows logo, as the macOS RustyBar has Apple's (its four squares are drawn: no
+  font has it). Its popup is the menu of Start's power button and of Win+X:
   About this PC, Task Manager, Settings, Sleep, Restart, Shut down, Lock, Sign out (with your
   name), and RustyBar's config. Restart, Shut down and Sign out take a second click, so a slip
   of the mouse doesn't end a game; they work as Start's do (fast startup, apps back after

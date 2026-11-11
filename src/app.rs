@@ -1173,6 +1173,12 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
         scene.fill(Rect::new(x + p.x - bar::HIGHLIGHT_X, y + bar::HIGHLIGHT_Y, p.width + 2.0 * bar::HIGHLIGHT_X, h), h / 2.0, t.primary);
     }
     for (item, p) in m.pill.items.iter().zip(&m.items) {
+        if item.logo {
+            for r in crate::ui::logo(x + p.x + p.text_x, y, p.width - p.text_x, t.pill_height, t.font_size, 1.0) {
+                scene.fill(r, 0.0, item.color);
+            }
+            continue;
+        }
         let font = if item.icon {
             Font::icons(t.font_size + 1.0)
         } else if item.small {
