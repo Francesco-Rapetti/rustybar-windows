@@ -86,11 +86,22 @@ pub fn single_instance() -> Option<HANDLE> {
 
 /// `rustybar quit`: asks the bar of this config dir to close, as a sign-out would.
 pub fn quit_running() {
+    quit(&crate::config::dir(), 0);
+}
+
+/// Asks the bar of config dir `dir` to close and waits up to `wait_ms` for its window to go.
+/// True if a bar was running.
+pub fn quit(dir: &std::path::Path, wait_ms: u64) -> bool {
+    let title = HSTRING::from(dir.to_string_lossy().as_ref());
     unsafe {
-        if let Ok(hwnd) = FindWindowW(CONTROL_CLASS, &instance_title()) {
-            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        let Ok(hwnd) = FindWindowW(CONTROL_CLASS, &title) else { return false };
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() < wait_ms as u128 && FindWindowW(CONTROL_CLASS, &title).is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
+    true
 }
 
 /// Gives back to Windows the pages the heaps keep after a free (what a popup used, gone with

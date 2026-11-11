@@ -9,6 +9,7 @@ mod bar;
 mod config;
 mod gfx;
 mod i18n;
+mod install;
 mod json;
 mod log;
 mod popup;
@@ -27,6 +28,14 @@ fn main() {
             std::process::exit(config::check());
         }
         Some("quit") => process::quit_running(),
+        Some("install") => {
+            process::attach_console();
+            std::process::exit(install::install());
+        }
+        Some("uninstall") => {
+            process::attach_console();
+            std::process::exit(install::uninstall());
+        }
         Some("--version") | Some("version") => {
             process::attach_console();
             println!("rustybar {}", env!("CARGO_PKG_VERSION"));

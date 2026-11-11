@@ -117,6 +117,10 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   una here-string passata a `-F -` non arriva su stdin.
 - `cargo build --release`, `cargo test --release`, `cargo clippy --release` (zero avvisi).
   `cargo` è in `%USERPROFILE%\.cargo\bin` (in Git Bash: `export PATH="$HOME/.cargo/bin:$PATH"`).
+- La barra vera è installata (`rustybar install`, sotto): gira da
+  `%LOCALAPPDATA%\Programs\RustyBar\rustybar.exe` con la config di `%APPDATA%\rustybar`, e parte
+  con Windows. Per provarne una nuova build: `target\release\rustybar.exe install` (chiude quella
+  installata, la sostituisce e la riavvia); l'utente può star giocando, quindi chiedere prima.
 - Barra di prova accanto a quella vera: una cartella con un `rustybar.toml` con
   `[bar] reserve = false` (non sposta le finestre), poi `RUSTYBAR_CONFIG_DIR=<cartella>` e
   `target\release\rustybar.exe`; con la stessa variabile `rustybar quit` chiude lei sola (le
@@ -180,7 +184,8 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   `AppsUseLightTheme`, `Accent\AccentPalette`; `level` per giallo e rosso, `tile` per i riquadri
   dei popup), `config.rs` (serde + toml, `deny_unknown_fields`, `rustybar check`), `process.rs`
   (DPI per schermo, priorità sotto il normale, EcoQoS, memoria a priorità bassa, un'istanza per
-  cartella; `make_small` anche per il figlio di `claude`), `stats.rs` (CPU, memoria, GPU dal
+  cartella; `make_small` anche per il figlio di `claude`; `quit` di una cartella con attesa),
+  `install.rs` (`rustybar install`/`uninstall`), `stats.rs` (CPU, memoria, GPU dal
   kernel grafico, dischi, processi: le letture di `system`), `json.rs` (lettore JSON per le
   risposte di Claude Code), `log.rs`, `i18n.rs` (testi, numeri e misure col separatore della
   regione).
@@ -418,7 +423,7 @@ dati.
 
 ## Domande aperte (da decidere con l'utente)
 
-- Nessuna per ora. Da fare: installazione e avvio con Windows.
+- Nessuna per ora.
 
 ## Stato
 
@@ -516,3 +521,23 @@ dati.
   0 figli. Primo frame 46–59 ms. Binario ~1,1 MB (processi, thread, JSON). Fuori dal layout
   predefinito perché costa: si aggiunge in `[layout]`. Non provati: «Esci» (toglierebbe il
   login), il timeout di un `claude.exe` appeso, l'accesso fallito, un secondo account.
+- 11/11/2026, **installazione e avvio con Windows** (scelte dell'utente: chiave Run, voce in
+  Impostazioni > App, config di esempio se manca, collegamento nel menu Start; installata e
+  avviata su questo PC). `install.rs`: `rustybar install` copia l'eseguibile in
+  `%LOCALAPPDATA%\Programs\RustyBar` (prima chiude la barra della cartella predefinita,
+  `process::quit` con attesa, e ritenta la copia per 5 s: lo stesso comando aggiorna), scrive
+  `config/rustybar.toml` (dentro l'eseguibile con `include_str!`) in `%APPDATA%\rustybar` se non
+  c'è, `HKCU\...\Run\RustyBar`, `HKCU\...\Uninstall\RustyBar` (nome, versione, editore,
+  dimensione, `UninstallString` = `rustybar.exe uninstall`, `NoModify`/`NoRepair`), il
+  collegamento `RustyBar.lnk` in `FOLDERID_Programs` (`IShellLinkW`), e avvia la barra staccata
+  dal terminale (`DETACHED_PROCESS`, fuori dal job del terminale se lo permette, senza
+  `RUSTYBAR_CONFIG_DIR`). `rustybar uninstall` toglie tutto e lascia config e log; lanciato
+  dalla copia installata (come fa «Disinstalla» di Impostazioni) sposta l'eseguibile in uso nei
+  file temporanei (`rustybar-uninstalled-<pid>.exe`, si può spostare ma non cancellare), che il
+  prossimo install o uninstall cancella. I messaggi non usano `println!`: su una pipe chiusa va
+  in panico e con `panic = "abort"` l'installazione restava a metà (successo davvero, con
+  `| head`). Provati qui: installazione (barra visibile, area di lavoro da y = 40, primo frame
+  53 ms, 4,9 MB privati), disinstallazione dalla copia installata (tutto tolto, config rimasta,
+  copia parcheggiata), reinstallazione (config lasciata com'era, parcheggiata cancellata),
+  aggiornamento con la barra accesa anche con l'output chiuso. Non provati: l'avvio vero
+  all'accesso a Windows, «Disinstalla» cliccato in Impostazioni (esegue lo stesso comando).

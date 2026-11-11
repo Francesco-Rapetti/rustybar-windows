@@ -50,22 +50,32 @@ the engines, as Task Manager reads them, would be 4 ms on a Radeon). An open pop
 gone the bar lets go of what drawing it left cached and gives the freed pages back to Windows:
 after 50 popups the bar is back where it started.
 
-## Build and run
+## Build and install
 
 Rust with the MSVC toolchain:
 
 ```
 cargo build --release
-target\release\rustybar.exe
+target\release\rustybar.exe install
 ```
 
-- `rustybar quit` closes the running bar (of the same config dir).
+`rustybar install`, for your user alone and without administrator rights:
+
+- copies the executable to `%LOCALAPPDATA%\Programs\RustyBar` (closing the installed bar first,
+  so the same command updates it);
+- writes the example config to `%APPDATA%\rustybar\rustybar.toml`, if there's none;
+- starts the bar with Windows (the `Run` key: Settings > Apps > Startup shows it, with its
+  switch);
+- lists it in Settings > Apps, whose *Uninstall* runs `rustybar uninstall`;
+- adds a *RustyBar* shortcut to the Start menu, and starts the bar.
+
+`rustybar uninstall` undoes all of it and leaves the config and the logs. Other commands:
+
+- `rustybar quit` closes the running bar (of the same config dir); the Start menu shortcut
+  starts it again.
 - `rustybar check` checks the config: that it parses, the theme exists and every name in
   `[layout]` is a widget.
 - The log is `%LOCALAPPDATA%\rustybar\rustybar.log`.
-
-There is no installer yet: to start it with Windows, put a shortcut to `rustybar.exe` in
-`shell:startup`.
 
 ## Configuration
 

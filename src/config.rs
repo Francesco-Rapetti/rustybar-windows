@@ -114,6 +114,11 @@ pub fn dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("RUSTYBAR_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
+    default_dir()
+}
+
+/// `%APPDATA%\rustybar`, the dir of the installed bar.
+pub fn default_dir() -> PathBuf {
     let appdata = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     appdata.join("rustybar")
 }
