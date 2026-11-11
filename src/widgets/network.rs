@@ -20,6 +20,9 @@
 //! Since Windows 11 24H2 the Wi-Fi network's name and the list of networks are given only to
 //! desktop apps that may use the location: without it the pill says `Wi-Fi` and the popup says
 //! what's missing, with the way to the setting.
+//!
+//! With made-up data (see `mock`) the connection, the traffic and the networks are those of
+//! `network.json`: Windows isn't asked or watched, and the clicks do nothing.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -51,6 +54,7 @@ use windows::core::{GUID, HSTRING, PCWSTR};
 
 use super::{Input, Reply, Signal};
 use crate::i18n::{number, size, t};
+use crate::json::Json;
 use crate::log;
 use crate::process;
 use crate::theme::{Rgba, Theme};
@@ -72,6 +76,7 @@ const REFRESH: &str = "\u{E72C}";
 /// behind a sign-in page or a limit.
 const LEVEL_NONE: i32 = 1;
 const LEVEL_LOCAL: i32 = 2;
+const LEVEL_INTERNET: i32 = 3;
 
 /// Interface types: Ethernet, Wi-Fi, loopback, and those of VPNs (PPP, tunnels, the virtual ones
 /// WireGuard and the like make).
@@ -438,11 +443,23 @@ pub struct Network {
     ping: Option<Ping>,
     shown: bool,
     open: Option<Open>,
+    mock: Option<Mock>,
+}
+
+/// What the made-up popup shows (see `mock`).
+struct Mock {
+    history: VecDeque<(f64, f64)>,
+    totals: (u64, u64),
+    ping: Option<u32>,
+    nearby: Option<Vec<Nearby>>,
 }
 
 impl Network {
     pub fn new() -> Network {
         let shared = Arc::new(Shared { wake: Wake::new(), changed: AtomicBool::new(false), wifi: AtomicBool::new(false), scanned: AtomicBool::new(false) });
+        if let Some(m) = crate::mock::load("network") {
+            return Network::mock(shared, &m);
+        }
         let mut n = Network {
             shared,
             notifications: Vec::new(),
@@ -455,9 +472,96 @@ impl Network {
             ping: None,
             shown: true,
             open: None,
+            mock: None,
         };
         n.attach();
         n
+    }
+
+    /// The widget with the made-up connection of `network.json`: nothing of Windows is asked or
+    /// watched, and no timer runs.
+    fn mock(shared: Arc<Shared>, m: &Json) -> Network {
+        let ip = |v: &Json| v.str().and_then(|s| s.parse::<IpAddr>().ok());
+        let band = |v: &Json| match v.f64() {
+            Some(ghz) if ghz < 3.0 => Some(two_four()),
+            Some(ghz) if ghz < 5.9 => Some("5 GHz"),
+            Some(_) => Some("6 GHz"),
+            None => None,
+        };
+        let adapter = |a: &Json| -> Option<Adapter> {
+            if a.is_null() {
+                return None;
+            }
+            let ipv4 = a["ipv4"].str().and_then(|s| {
+                let (ip, prefix) = s.split_once('/').unwrap_or((s, "24"));
+                Some((ip.parse().ok()?, prefix.parse().ok()?))
+            });
+            let kind = match a["kind"].str() {
+                Some("wifi") => Kind::Wifi,
+                Some("ethernet") => Kind::Ethernet,
+                _ => Kind::Other,
+            };
+            Some(Adapter {
+                kind,
+                name: a["name"].str().unwrap_or_default().to_string(),
+                description: a["description"].str().unwrap_or_default().to_string(),
+                speed: a["speed"].f64().unwrap_or(0.0) as u64,
+                luid: 0,
+                ipv4,
+                gateway: ip(&a["gateway"]),
+                dns: a["dns"].array().iter().filter_map(ip).collect(),
+                mac: a["mac"].str().unwrap_or_default().to_string(),
+                ipv6: a["ipv6"].str().and_then(|s| s.parse().ok()),
+            })
+        };
+        let w = &m["wifi"];
+        let wifi = (!w.is_null()).then(|| WifiLink {
+            ssid: w["ssid"].str().unwrap_or_default().to_string(),
+            signal: w["signal"].f64().unwrap_or(0.0) as u32,
+            rate: w["rate"].f64().unwrap_or(0.0) as u32,
+            phy: w["phy"].f64().unwrap_or(0.0) as i32,
+            band: band(&w["band"]),
+        });
+        let level = match m["level"].str() {
+            Some("none") => LEVEL_NONE,
+            Some("local") => LEVEL_LOCAL,
+            _ => LEVEL_INTERNET,
+        };
+        let pair = |v: &Json| (v.array().first().and_then(Json::f64).unwrap_or(0.0), v.array().get(1).and_then(Json::f64).unwrap_or(0.0));
+        let nearby = (!m["networks"].is_null()).then(|| {
+            m["networks"]
+                .array()
+                .iter()
+                .map(|n| Nearby {
+                    ssid: n["ssid"].str().unwrap_or_default().to_string(),
+                    profile: if n["known"].bool() == Some(true) { n["ssid"].str().unwrap_or_default().to_string() } else { String::new() },
+                    signal: n["signal"].f64().unwrap_or(0.0) as u32,
+                    secured: n["secured"].bool().unwrap_or(true),
+                    connected: n["connected"].bool().unwrap_or(false),
+                    band: band(&n["band"]),
+                })
+                .collect()
+        });
+        let totals = pair(&m["totals"]);
+        Network {
+            shared,
+            notifications: Vec::new(),
+            wlan: None,
+            level,
+            adapter: adapter(&m["adapter"]),
+            vpn: adapter(&m["vpn"]),
+            wifi,
+            timer: Timer::new(),
+            ping: None,
+            shown: true,
+            open: None,
+            mock: Some(Mock {
+                history: m["traffic"].array().iter().map(pair).collect(),
+                totals: (totals.0 as u64, totals.1 as u64),
+                ping: m["ping"].f64().map(|p| p as u32),
+                nearby,
+            }),
+        }
     }
 
     /// Asks Windows to say when the network changes, and reads it.
@@ -664,6 +768,9 @@ impl super::Widget for Network {
     }
 
     fn event(&mut self, signal: &Signal) -> bool {
+        if self.mock.is_some() {
+            return false;
+        }
         match signal {
             Signal::Shown(shown) if *shown != self.shown => {
                 self.shown = *shown;
@@ -685,6 +792,19 @@ impl super::Widget for Network {
     }
 
     fn popup_shown(&mut self, open: bool) {
+        if let Some(m) = &self.mock {
+            self.open = open.then(|| Open {
+                history: m.history.clone(),
+                last: None,
+                totals: m.totals,
+                ticks: 0,
+                ping: m.ping,
+                nearby: m.nearby.clone().map(Ok),
+                scanning: false,
+                copied: None,
+            });
+            return;
+        }
         if open {
             self.read();
             let nearby = self.wlan.as_ref().map(|w| {
@@ -863,6 +983,8 @@ impl super::Widget for Network {
     fn popup_input(&mut self, input: &Input) -> Reply {
         let Input::Action(action) = input else { return Reply::Nothing };
         match *action {
+            // Made-up data: nothing is copied, joined or opened
+            _ if self.mock.is_some() => Reply::Nothing,
             "settings" => {
                 process::open("ms-settings:network-status");
                 Reply::Opened
@@ -1059,10 +1181,15 @@ fn generation(phy: i32) -> Option<&'static str> {
     }
 }
 
+/// `2,4 GHz` or `2.4 GHz`, as the region writes decimals.
+fn two_four() -> &'static str {
+    if crate::i18n::number(2.4, 1) == "2,4" { "2,4 GHz" } else { "2.4 GHz" }
+}
+
 /// The band of a channel's center frequency, in kHz.
 fn band(khz: u32) -> Option<&'static str> {
     match khz / 1000 {
-        2400..=2500 => Some("2,4 GHz"),
+        2400..=2500 => Some(two_four()),
         5150..=5925 => Some("5 GHz"),
         5926..=7125 => Some("6 GHz"),
         _ => None,
@@ -1291,7 +1418,7 @@ mod tests {
         assert!(link_speed(2_500_000_000).starts_with("2"));
         assert_eq!(rate(0.0), "0 KB/s");
         assert_eq!(rate(840.0 * 1024.0), "840 KB/s");
-        assert_eq!(band(2_437_000), Some("2,4 GHz"));
+        assert_eq!(band(2_437_000), Some(two_four()));
         assert_eq!(band(5_180_000), Some("5 GHz"));
         assert_eq!(band(5_955_000), Some("6 GHz"));
         assert_eq!(signal_bars(10), 0);

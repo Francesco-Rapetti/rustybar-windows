@@ -270,11 +270,18 @@ impl Gpu {
     pub fn reset(&mut self) {
         self.last = None;
     }
+
+    /// A made-up GPU (see `mock`), with no adapter behind it: its readings are the widget's.
+    pub fn mock(name: String, dedicated: u64, hot: Option<f32>) -> Gpu {
+        Gpu { luid: LUID::default(), adapter: 0, name, dedicated, segments: 0, nodes: Vec::new(), last: None, hot }
+    }
 }
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        close_adapter(self.adapter);
+        if self.adapter != 0 {
+            close_adapter(self.adapter);
+        }
     }
 }
 

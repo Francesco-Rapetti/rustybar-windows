@@ -130,7 +130,6 @@ pub enum Reply {
     /// The widget changed what the popup shows.
     Redraw,
     /// Done: the popup closes and the app that was in front comes back.
-    #[allow(dead_code)] // For the popups to come: a choice that ends them
     Close,
     /// The widget opened something (a page, an app) that takes the front: the popup closes and
     /// leaves the front to it.
@@ -145,7 +144,7 @@ pub fn create(kind: &str, options: &Options) -> Option<Box<dyn Widget>> {
         "media" => Some(Box::new(media::Media::new(options))),
         "network" => Some(Box::new(network::Network::new())),
         "power" => Some(Box::new(power::Power::new())),
-        "front_app" => Some(Box::new(front_app::FrontApp::default())),
+        "front_app" => Some(Box::new(front_app::FrontApp::new())),
         "docker" => Some(Box::new(docker::Docker::new(options))),
         "events" => Some(Box::new(events::Events::new(options))),
         "home" => Some(Box::new(home::Home::new(options))),

@@ -39,7 +39,15 @@ fn main() {
             use std::io::Write;
             process::attach_console();
             // Not println!: on a closed pipe (`| select -First 1`) it would panic
-            let words = &args[1..];
+            let mut words = args[1..].to_vec();
+            // The bar runs elsewhere: the file of a shot goes where this terminal is
+            if words.first().is_some_and(|w| w == "shot")
+                && let Some(file) = words.get_mut(2)
+                && let Ok(absolute) = std::path::absolute(&*file)
+            {
+                *file = absolute.display().to_string();
+            }
+            let words = &words[..];
             if words.is_empty() {
                 let _ = writeln!(std::io::stdout(), "{}", app::USAGE);
                 std::process::exit(2);

@@ -1,0 +1,13 @@
+{
+  "outputs": [
+    {"name": "Headphones (Aurora Buds)", "form": 3, "bluetooth": true, "battery": 15, "default": true},
+    {"name": "Speakers (High Definition Audio)", "form": 1},
+    {"name": "Monitor (DisplayPort Audio)", "form": 9}
+  ],
+  "inputs": [
+    {"name": "Headset (Aurora Buds)", "form": 5, "bluetooth": true, "battery": 15, "default": true},
+    {"name": "Microphone (USB Audio)", "form": 4}
+  ],
+  "output_volume": 40,
+  "input_volume": 70
+}

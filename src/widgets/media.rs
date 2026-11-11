@@ -33,9 +33,9 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionPlaybackControls as Controls, GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
 use windows::Media::MediaPlaybackAutoRepeatMode as Repeat;
-use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, S_OK};
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GENERIC_READ, HANDLE, S_OK};
 use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapInterpolationModeHighQualityCubic,
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICBitmapDecoder, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapInterpolationModeHighQualityCubic,
     WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand, WICRect,
 };
 use windows::Win32::Media::Audio::{
@@ -52,6 +52,7 @@ use windows::core::{BOOL, GUID, HSTRING, Interface, PCWSTR, PWSTR, implement};
 use super::{Input, Reply, Signal};
 use crate::config::Options;
 use crate::i18n::t;
+use crate::json::Json;
 use crate::log;
 use crate::palette::Palette;
 use crate::theme::Theme;
@@ -245,6 +246,23 @@ pub struct Media {
     /// Whether the popup shows the cover (`cover = false`: no thumbnail read, no WIC).
     covers: bool,
     open: Option<Open>,
+    mock: Option<Mock>,
+}
+
+/// The made-up players of `media.json` (see `mock`), and the one Windows would call current.
+struct Mock {
+    players: Vec<Player>,
+    current: usize,
+}
+
+/// A made-up player: its app, its track and its state, its cover's file and its volume.
+struct Player {
+    aumid: String,
+    track: Track,
+    playback: Playback,
+    timeline: Timeline,
+    cover: Option<std::path::PathBuf>,
+    volume: Option<(f32, bool)>,
 }
 
 impl Media {
@@ -264,6 +282,9 @@ impl Media {
             cover_colors: options.bool("cover_colors").unwrap_or(true),
             labels: Mutex::new(Vec::new()),
         });
+        if let Some(m) = crate::mock::load("media") {
+            return Media::mock(options, shared, &m);
+        }
         // The manager comes asynchronously: the first frame doesn't wait for it
         let s = shared.clone();
         let asked = Manager::RequestAsync().and_then(|op| {
@@ -294,6 +315,151 @@ impl Media {
             show_paused: options.bool("paused").unwrap_or(true),
             covers: options.bool("cover").unwrap_or(true),
             open: None,
+            mock: None,
+        }
+    }
+
+    /// The widget with the made-up players of `media.json`: no media session is asked for or
+    /// followed. Each player: `app` (its id, as `Spotify.exe`), `title`, `artist`, `state`
+    /// (`playing` or `paused`), `duration` and `position` in seconds, `shuffle`, `repeat` (`off`,
+    /// `all`, `one`), `volume` in percent, `cover` (a file next to `media.json`) and `controls`
+    /// (`previous`, `next`, `seek`: false for one the app doesn't allow).
+    fn mock(options: &Options, shared: Arc<Shared>, m: &Json) -> Media {
+        let dir = crate::mock::dir().unwrap_or_default();
+        let players: Vec<Player> = m["players"]
+            .array()
+            .iter()
+            .map(|p| {
+                let can = |k: &str| p["controls"][k].bool().unwrap_or(true);
+                let ticks = |k: &str| (p[k].f64().unwrap_or(0.0) * 10_000_000.0) as i64;
+                let status = if p["state"].str() == Some("paused") { Status::Paused.0 } else { Status::Playing.0 };
+                let repeat = p["repeat"].str().map(|r| match r {
+                    "one" => Repeat::Track.0,
+                    "all" => Repeat::List.0,
+                    _ => Repeat::None.0,
+                });
+                Player {
+                    aumid: p["app"].str().unwrap_or_default().to_string(),
+                    track: Track { title: p["title"].str().unwrap_or_default().to_string(), artist: p["artist"].str().unwrap_or_default().to_string() },
+                    playback: Playback { status, previous: can("previous"), next: can("next"), toggle: true, seek: can("seek"), shuffle: p["shuffle"].bool(), repeat },
+                    timeline: Timeline { start: 0, end: ticks("duration"), position: ticks("position"), updated: now() },
+                    cover: p["cover"].str().map(|c| dir.join(c)),
+                    volume: p["volume"].f64().map(|v| (v as f32 / 100.0, false)),
+                }
+            })
+            .collect();
+        let current = (m["current"].f64().unwrap_or(0.0) as usize).min(players.len().saturating_sub(1));
+        let mut media = Media {
+            shared,
+            manager: None,
+            manager_token: None,
+            sessions_token: None,
+            hooked: None,
+            aumid: String::new(),
+            track: Track::default(),
+            playback: Playback::default(),
+            timeline: Timeline::default(),
+            timer: Timer::new(),
+            shown: true,
+            show_paused: options.bool("paused").unwrap_or(true),
+            covers: options.bool("cover").unwrap_or(true),
+            open: None,
+            mock: Some(Mock { players, current }),
+        };
+        media.play_mock(current);
+        media
+    }
+
+    /// Shows the made-up player `index`: in the pill, and in the popup if it's open.
+    fn play_mock(&mut self, index: usize) {
+        let Some(p) = self.mock.as_ref().and_then(|m| m.players.get(index)) else { return };
+        self.aumid = p.aumid.clone();
+        self.track = p.track.clone();
+        self.playback = p.playback;
+        self.timeline = p.timeline;
+        self.fill_mock_popup();
+    }
+
+    /// What the open popup shows of the made-up player in the pill: its cover with its colors,
+    /// its volume, and the apps of the switch.
+    fn fill_mock_popup(&mut self) {
+        if self.open.is_none() {
+            return;
+        }
+        let Some(p) = self.mock.as_ref().and_then(|m| m.players.iter().find(|p| p.aumid == self.aumid)) else { return };
+        let cover = p.cover.as_deref().filter(|_| self.covers).and_then(decode_cover_file);
+        let palette = cover.as_ref().filter(|_| self.shared.cover_colors).and_then(|c| Palette::of_bgra(&c.pixels, c.width as usize, 2));
+        let volume = p.volume.map(|(level, muted)| AppVolume::mock(&self.shared, level, muted));
+        let sources: Vec<Source> = self.mock.as_ref().map_or(Vec::new(), |m| {
+            m.players.iter().map(|p| Source { aumid: p.aumid.clone(), name: app_name(&p.aumid) }).collect()
+        });
+        if let Some(open) = &mut self.open {
+            open.app = app_name(&self.aumid);
+            open.cover = cover.map(Arc::new);
+            open.palette = palette;
+            open.volume = volume;
+            open.sources = sources;
+        }
+    }
+
+    /// With made-up data the controls change the made-up player alone.
+    fn mock_input(&mut self, input: &Input) -> Reply {
+        match input {
+            Input::Action(a) if a.starts_with("source:") => {
+                let Some(index) = a.strip_prefix("source:").and_then(|i| i.parse::<usize>().ok()) else { return Reply::Nothing };
+                self.play_mock(index);
+                if let Some(open) = &mut self.open {
+                    open.pick = Some(self.aumid.clone());
+                }
+                self.schedule();
+                Reply::Redraw
+            }
+            Input::Action("mute") => match self.open.as_mut().and_then(|o| o.volume.as_mut()) {
+                Some(v) => {
+                    v.set_mute(!v.muted);
+                    Reply::Redraw
+                }
+                None => Reply::Nothing,
+            },
+            Input::Slide("volume", fraction) => match self.open.as_mut().and_then(|o| o.volume.as_mut()) {
+                Some(v) => {
+                    v.set_level(*fraction);
+                    Reply::Redraw
+                }
+                None => Reply::Nothing,
+            },
+            Input::Action("toggle") | Input::Key(0x20) => {
+                // Paused where it is, or playing on from there
+                if let Some((position, _)) = self.position() {
+                    self.timeline.position = self.timeline.start + position;
+                }
+                self.timeline.updated = now();
+                self.playback.status = if self.playback.playing() { Status::Paused.0 } else { Status::Playing.0 };
+                self.schedule();
+                Reply::Redraw
+            }
+            Input::Action("shuffle") => {
+                self.playback.shuffle = self.playback.shuffle.map(|on| !on);
+                Reply::Redraw
+            }
+            Input::Action("repeat") => {
+                self.playback.repeat = self.playback.repeat.map(next_repeat);
+                Reply::Redraw
+            }
+            Input::Slide("seek", fraction) => {
+                if let Some(open) = &mut self.open {
+                    open.seek = Some(*fraction);
+                }
+                Reply::Redraw
+            }
+            Input::Release("seek") => {
+                let Some(fraction) = self.open.as_mut().and_then(|o| o.seek.take()) else { return Reply::Nothing };
+                let t = self.timeline;
+                self.timeline.position = t.start + ((t.end - t.start) as f64 * fraction as f64) as i64;
+                self.timeline.updated = now();
+                Reply::Redraw
+            }
+            _ => Reply::Nothing,
         }
     }
 
@@ -634,6 +800,9 @@ impl super::Widget for Media {
     }
 
     fn event(&mut self, signal: &Signal) -> bool {
+        if self.mock.is_some() {
+            return false;
+        }
         match signal {
             Signal::Shown(shown) if *shown != self.shown => {
                 self.shown = *shown;
@@ -664,6 +833,17 @@ impl super::Widget for Media {
     }
 
     fn popup_shown(&mut self, open: bool) {
+        if let Some(current) = self.mock.as_ref().map(|m| m.current) {
+            if open {
+                self.open = Some(Open { app: String::new(), cover: None, palette: None, seek: None, sources: Vec::new(), pick: None, volume: None });
+                self.fill_mock_popup();
+            } else if self.open.take().is_some_and(|o| o.pick.is_some()) {
+                // Back to the player Windows would call current
+                self.play_mock(current);
+            }
+            self.schedule();
+            return;
+        }
         self.shared.cover_wanted.store(open && self.covers, Ordering::Release);
         if open {
             self.open = Some(Open {
@@ -713,7 +893,7 @@ impl super::Widget for Media {
         let tinted = open.palette.map(|p| p.theme(theme));
         let theme = tinted.as_ref().unwrap_or(theme);
         let position = self.position();
-        let volume = open.volume.as_ref().filter(|v| !v.sessions.is_empty());
+        let volume = open.volume.as_ref().filter(|v| !v.sessions.is_empty() || self.mock.is_some());
         let mut height = MARGIN + PAD + COVER + PAD;
         if switch {
             height += SOURCES_H + 4.0;
@@ -844,6 +1024,9 @@ impl super::Widget for Media {
     }
 
     fn popup_input(&mut self, input: &Input) -> Reply {
+        if self.mock.is_some() {
+            return self.mock_input(input);
+        }
         // What doesn't go to the session: the switch and the app's volume
         match input {
             Input::Action(a) if a.starts_with("source:") => {
@@ -1038,6 +1221,11 @@ impl AppVolume {
         Some(v)
     }
 
+    /// A made-up volume (see `mock`), with no audio session behind it.
+    fn mock(shared: &Arc<Shared>, level: f32, muted: bool) -> AppVolume {
+        AppVolume { sessions: Vec::new(), events: SessionEvents { shared: shared.clone() }.into(), level, muted }
+    }
+
     fn read(&mut self) {
         let Some((_, volume)) = self.sessions.first() else { return };
         unsafe {
@@ -1149,16 +1337,29 @@ fn readable(aumid: &str) -> String {
 /// The track's cover, cut to a square from its middle and scaled to `COVER_PX`, ready to draw.
 /// On the thread the properties came on (a worker of Windows' thread pool).
 fn decode_cover(properties: &Properties) -> Option<Image> {
-    static IDS: AtomicU64 = AtomicU64::new(1);
     let reference = properties.Thumbnail().ok()?;
     let stream = reference.OpenReadAsync().ok()?.join().ok()?;
+    decode(|wic| unsafe {
+        let source: IStream = CreateStreamOverRandomAccessStream(&stream)?;
+        wic.CreateDecoderFromStream(&source, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+    })
+}
+
+/// A made-up cover, from its file (see `mock`).
+fn decode_cover_file(path: &std::path::Path) -> Option<Image> {
+    let path = HSTRING::from(path);
+    decode(|wic| unsafe { wic.CreateDecoderFromFilename(&path, None, GENERIC_READ, WICDecodeMetadataCacheOnDemand) })
+}
+
+/// A cover from the decoder `open` makes, cut to a square from its middle and scaled.
+fn decode(open: impl FnOnce(&IWICImagingFactory) -> windows::core::Result<IWICBitmapDecoder>) -> Option<Image> {
+    static IDS: AtomicU64 = AtomicU64::new(1);
     unsafe {
         // The pool's threads may have no COM yet: WIC needs it
         let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
         let image = (|| -> windows::core::Result<Image> {
-            let source: IStream = CreateStreamOverRandomAccessStream(&stream)?;
             let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-            let decoder = wic.CreateDecoderFromStream(&source, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?;
+            let decoder = open(&wic)?;
             let frame = decoder.GetFrame(0)?;
             let (mut w, mut h) = (0u32, 0u32);
             frame.GetSize(&mut w, &mut h)?;

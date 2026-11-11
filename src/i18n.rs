@@ -1,16 +1,31 @@
 //! Texts in Italian or English, as the language of Windows is, and numbers as the region writes
-//! them.
+//! them. `RUSTYBAR_LOCALE` (a locale name, `en-US`) sets both, for screenshots in another
+//! language.
 
 use std::sync::OnceLock;
 
 use windows::Win32::Globalization::{GetLocaleInfoEx, GetUserDefaultUILanguage, LOCALE_SDECIMAL};
-use windows::core::PCWSTR;
+use windows::core::{HSTRING, PCWSTR};
 
-/// Whether Windows speaks Italian (any region).
+fn chosen() -> Option<&'static HSTRING> {
+    static CHOSEN: OnceLock<Option<HSTRING>> = OnceLock::new();
+    CHOSEN.get_or_init(|| std::env::var("RUSTYBAR_LOCALE").ok().filter(|l| !l.is_empty()).map(HSTRING::from)).as_ref()
+}
+
+/// The locale that dates, times and numbers follow, for the `*Ex` functions of Windows: the
+/// user's (null), or `RUSTYBAR_LOCALE`.
+pub fn locale() -> PCWSTR {
+    chosen().map_or(PCWSTR::null(), |l| PCWSTR(l.as_ptr()))
+}
+
+/// Whether Windows speaks Italian (any region), or `RUSTYBAR_LOCALE` does.
 pub fn italian() -> bool {
     static ITALIAN: OnceLock<bool> = OnceLock::new();
-    // The primary language is the low 10 bits of the LANGID; 0x10 is Italian
-    *ITALIAN.get_or_init(|| unsafe { GetUserDefaultUILanguage() } & 0x3ff == 0x10)
+    *ITALIAN.get_or_init(|| match chosen() {
+        Some(l) => l.to_string().to_lowercase().starts_with("it"),
+        // The primary language is the low 10 bits of the LANGID; 0x10 is Italian
+        None => (unsafe { GetUserDefaultUILanguage() } & 0x3ff) == 0x10,
+    })
 }
 
 /// `t("italiano", "english")`
@@ -23,7 +38,7 @@ fn separator() -> &'static str {
     static SEPARATOR: OnceLock<String> = OnceLock::new();
     SEPARATOR.get_or_init(|| {
         let mut buf = [0u16; 8];
-        let n = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_SDECIMAL, Some(&mut buf)) };
+        let n = unsafe { GetLocaleInfoEx(locale(), LOCALE_SDECIMAL, Some(&mut buf)) };
         if n > 1 { String::from_utf16_lossy(&buf[..n as usize - 1]) } else { ".".into() }
     })
 }

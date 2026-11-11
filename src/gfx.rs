@@ -4,12 +4,20 @@
 //! bar draws into a surface only when its content changes; between changes, and during an
 //! animation, the process does nothing.
 
-use windows::Win32::Foundation::{E_FAIL, HMODULE, POINT};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
+use std::path::Path;
+
+use windows::Win32::Foundation::{E_FAIL, GENERIC_WRITE, HMODULE, POINT};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Device,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_MAP_OPTIONS_READ,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
 };
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
+    WICBitmapDitherTypeNone, WICBitmapEncoderNoCache, WICBitmapPaletteTypeCustom,
+};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, D3D11_CREATE_DEVICE_SINGLETHREADED,
@@ -20,7 +28,7 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
-use windows::core::{Interface, Result};
+use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::Matrix3x2;
 
 use crate::log;
@@ -132,6 +140,65 @@ impl Gfx {
 
     pub fn commit(&self) -> Result<()> {
         unsafe { self.dcomp.Commit() }
+    }
+
+    /// Draws an image `width` × `height` pixels away from the screen, in DIPs at `scale`, and
+    /// writes it to `path` as a PNG: the screenshots of `rustybar msg shot`, made by the bar
+    /// itself, never a capture of the screen.
+    pub fn png(&self, width: u32, height: u32, scale: f32, path: &Path, f: impl FnOnce(&ID2D1DeviceContext, &ID2D1SolidColorBrush)) -> Result<()> {
+        unsafe {
+            let ctx = self.d2d.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            let properties = |options| D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: options,
+                colorContext: std::mem::ManuallyDrop::new(None),
+            };
+            let size = D2D_SIZE_U { width: width.max(1), height: height.max(1) };
+            let target = ctx.CreateBitmap(size, None, 0, &properties(D2D1_BITMAP_OPTIONS_TARGET))?;
+            ctx.SetTarget(&target);
+            ctx.SetDpi(96.0 * scale, 96.0 * scale);
+            ctx.BeginDraw();
+            ctx.Clear(Some(&color(Rgba::TRANSPARENT)));
+            ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            let brush = ctx.CreateSolidColorBrush(&color(Rgba::TRANSPARENT), None)?;
+            f(&ctx, &brush);
+            ctx.EndDraw(None, None)?;
+            // Read back through a bitmap the CPU can map
+            let read = ctx.CreateBitmap(size, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+            read.CopyFromBitmap(None, &target, None)?;
+            let mapped = read.Map(D2D1_MAP_OPTIONS_READ)?;
+            let pixels = std::slice::from_raw_parts(mapped.bits, (mapped.pitch * size.height) as usize);
+            let written = write_png(path, size.width, size.height, mapped.pitch, pixels);
+            read.Unmap()?;
+            written
+        }
+    }
+}
+
+/// Premultiplied BGRA pixels to a PNG file, with WIC.
+fn write_png(path: &Path, width: u32, height: u32, pitch: u32, pixels: &[u8]) -> Result<()> {
+    unsafe {
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let bitmap = wic.CreateBitmapFromMemory(width, height, &GUID_WICPixelFormat32bppPBGRA, pitch, pixels)?;
+        // PNG keeps straight alpha
+        let converter = wic.CreateFormatConverter()?;
+        converter.Initialize(&bitmap, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
+        let stream = wic.CreateStream()?;
+        stream.InitializeFromFilename(&HSTRING::from(path), GENERIC_WRITE.0)?;
+        let encoder = wic.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;
+        encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+        let mut frame = None;
+        encoder.CreateNewFrame(&mut frame, std::ptr::null_mut())?;
+        let frame = frame.ok_or_else(|| windows::core::Error::from(E_FAIL))?;
+        frame.Initialize(None)?;
+        frame.SetSize(width, height)?;
+        let mut format = GUID_WICPixelFormat32bppBGRA;
+        frame.SetPixelFormat(&mut format)?;
+        frame.WriteSource(&converter, std::ptr::null())?;
+        frame.Commit()?;
+        encoder.Commit()
     }
 }
 

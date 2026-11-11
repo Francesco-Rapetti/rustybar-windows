@@ -155,6 +155,10 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   `| Out-Host`). Qui non c'è Python.
 - `RUSTYBAR_GPU=hardware`: device Direct3D hardware invece di WARP, per confrontare.
 - Screenshot della barra: `System.Drawing` `CopyFromScreen` sulla striscia in alto, poi guardarli.
+  Per i popup (e per il README) meglio `rustybar msg shot <widget> <file.png> [scala]`: la barra
+  li disegna fuori schermo, niente dello schermo dell'utente nella foto. La barra finta:
+  `RUSTYBAR_MOCK`, `RUSTYBAR_CONFIG_DIR` = `examples\mock` e `RUSTYBAR_LOCALE=en-US` (sezione
+  «Made-up data» del README); log `rustybar-mock.log`.
 
 ## Com'è fatta
 
@@ -498,7 +502,7 @@ in quest'ordine (le piccole prima, Lua e impostazioni per ultime):
 5. `home` (Home Assistant), 6. `events` (prossimo evento dall'indirizzo iCal segreto di Google
    Calendar: Windows non ha un calendario leggibile da un'app non pacchettizzata), 7. `docker`
    (Engine API sulla named pipe di Docker Desktop) (fatti).
-8. Dati finti (`RUSTYBAR_MOCK`) e screenshot dei popup nel README.
+8. Dati finti (`RUSTYBAR_MOCK`) e screenshot dei popup nel README (fatto, sotto).
 9. Widget in Lua, 10. finestra delle impostazioni (in un processo suo).
 
 Lasciati fuori: `aerospace` (niente tiling WM per decisione), `battery` (questo PC non ha una
@@ -573,7 +577,30 @@ la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
   `secret.rs` (credenziali generiche `rustybar-<nome>`, `CRED_PERSIST_LOCAL_MACHINE`; `rustybar
   secret set|delete|check <nome>`; provato con un nome usa e getta: le scritture dal processo
   dentro il pacchetto Claude finiscono nel Gestore vero), `mock.rs` (`RUSTYBAR_MOCK=<cartella>`:
-  i widget coi dati personali leggono `<cartella>/<widget>.json`; `examples/mock`).
+  tutti i widget tranne `clock` leggono `<cartella>/<widget>.json`; `examples/mock`).
+- Dati finti e screenshot (fatto, 11/11/2026): ogni widget ha il suo `examples/mock/<nome>.json`
+  e con `RUSTYBAR_MOCK` non legge, non ascolta e non lancia niente del PC (niente Core Audio,
+  GSMTC, IP Helper, WLAN, registro, processi, `claude.exe`, timer); ciò che cambierebbe il PC non
+  fa nulla (comandi di `power`, cambio di dispositivo, appunti, collegamento al Wi-Fi, link),
+  cursori, muto, selettori e player cambiano solo il dato finto, il clic su un desktop di
+  `workspaces` sposta l'evidenziazione senza tasti. `power` il `user`; `front_app` il `name`;
+  `workspaces` `desktops` e `current`; `claude` gli `accounts` per `dir` (`~/.claude` senza),
+  `at` minuti fa e `reset` fra quanti minuti, la cartella mostrata com'è scritta nella config;
+  `system` CPU, memoria e dischi in GB, GPU (`Gpu::mock`, senza scheda), storico, app; `audio`
+  uscite e ingressi (`form`, `bluetooth`, `battery`, `default`) e volumi; `network` scheda,
+  Wi-Fi, VPN, traffico, ping e reti (banda in GHz); `media` i player (`app` come AUMID, stato,
+  durata e posizione in secondi, shuffle, ripetizione, volume, copertina da file accanto, decodificata
+  con lo stesso WIC: `decode_cover_file`) e `current`. Copertine di `examples/mock/media` dalla
+  versione macOS (disegnate, inventate). `examples/mock/rustybar.toml`: la barra degli screenshot
+  con tutti i widget, `reserve = false` e l'accento di un Windows nuovo (`#4cc2ff`).
+  `rustybar msg shot <widget|⋯lato|bar[:left,center,right]> <file.png> [scala]`: la barra disegna
+  fuori schermo (`Gfx::png`: device context Direct2D sul device WARP, bitmap bersaglio, copia in
+  una bitmap leggibile dalla CPU, PNG con WIC; `popup::shot`/`paint`, `bar::paint_pill`) il popup
+  come appena aperto (`popup_shown(true)`, scena, `popup_shown(false)`; se è già aperto la sua
+  scena) o le pill piene una dopo l'altra su `crust`; il processo `msg` rende assoluto il
+  percorso. `RUSTYBAR_LOCALE` (`en-US`): lingua dei testi e formati di date e numeri
+  (`i18n::locale()` al posto del null nelle funzioni `*Ex`), per gli screenshot in inglese.
+  Costo a riposo: nessuno (una variabile d'ambiente letta all'avvio).
 - `home` (fatto, sopra le decisioni): pill con la casa (`E80F`) nel blu di Home Assistant
   (`#18bcf2`) e quanti dispositivi delle tessere sono accesi (luci, prese, ventole,
   input_boolean accesi; clima non spento; robot che pulisce), grigia senza conteggio se il
@@ -858,4 +885,16 @@ la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
   `clock` finiscono nel ⋯): il logo da solo e l'orologio con sfondo e bordo. Nota per le prove
   del ⋯: col margine il popup resta a `margin` dai bordi dello schermo, quindi con un margine
   enorme non c'è posto e non si apre (`msg popup` dice comunque `ok`). Non visti: il tema chiaro
-  (il logo nel colore del testo scuro sul desktop) e una scala diversa dal 100%.
+  (il logo nel colore del testo scuro sul desktop) e una scala diversa dal 100%. Committato e
+  pushato (`34a8a4e`) e installato, con il permesso dell'utente.
+- 11/11/2026, **dati finti e screenshot** (punto 8; dettagli in «Dalla versione macOS»): i dati
+  finti degli otto widget che non li avevano, `msg shot`, `RUSTYBAR_LOCALE`, e 12 PNG in
+  `docs/screenshots` (le due estremità della barra e dieci popup, in inglese, a scala 2) nel
+  README, fatti dalla barra finta in `examples\mock`, rimasta accesa sopra quella vera solo il
+  tempo degli scatti. Viste guardando i PNG, in inglese saltate fuori e corrette: la data lunga
+  nel popup di `clock` tagliata (ora senza l'anno quando non ci sta: il modello della regione,
+  `LOCALE_SLONGDATE`, senza le `y`), «Container» per i container senza progetto di `docker`
+  (ora «Containers»; e le percentuali senza spazio, come negli altri widget), `2,4 GHz` di
+  `network` con la virgola fissa (ora col separatore della regione). Test: ogni JSON di
+  `examples/mock` si legge. Binario ~1,93 MB. Non provati: i clic sui popup finti (cursori,
+  muto, selettori del player e il clic su un desktop) e la barra finta col tema chiaro.

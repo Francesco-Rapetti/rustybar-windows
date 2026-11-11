@@ -1,0 +1,22 @@
+{
+  "cores": 8,
+  "logical": 16,
+  "cpu": {"user": 12, "system": 6},
+  "memory": {"total": 32, "used": 13.8, "committed": 19.6, "limit": 37.9},
+  "gpu": {"name": "Radeon RX 7700 XT", "use": 34, "temperature": 62, "hot": 95, "dedicated": 12, "used": 3.4},
+  "cpu_history": [9, 11, 8, 14, 22, 35, 41, 28, 19, 15, 12, 10, 13, 9, 8, 24, 52, 78, 64, 33, 21, 17, 14, 12, 16, 20, 15, 13, 17, 18],
+  "gpu_history": [14, 15, 14, 16, 19, 24, 38, 42, 40, 36, 35, 35, 36, 34, 34, 40, 56, 81, 70, 46, 41, 39, 38, 37, 39, 32, 30, 29, 31, 34],
+  "disks": [
+    {"root": "C:\\", "label": "", "total": 931.5, "free": 402.7},
+    {"root": "D:\\", "label": "Games", "total": 1863, "free": 168}
+  ],
+  "apps": [
+    {"name": "Firefox", "exe": "firefox.exe", "cpu": 4.2, "memory": 1.62},
+    {"name": "Desktop Window Manager", "exe": "dwm.exe", "cpu": 2.3, "memory": 0.21},
+    {"name": "Steam", "exe": "steam.exe", "cpu": 1.1, "memory": 0.42},
+    {"name": "Discord", "exe": "discord.exe", "cpu": 0.7, "memory": 0.58},
+    {"name": "Windows Terminal", "exe": "windowsterminal.exe", "cpu": 0.4, "memory": 0.12},
+    {"name": "Windows Explorer", "exe": "explorer.exe", "cpu": 0.2, "memory": 0.16},
+    {"name": "Spotify", "exe": "spotify.exe", "cpu": 0.3, "memory": 0.31}
+  ]
+}

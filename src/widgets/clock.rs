@@ -20,7 +20,7 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, SYSTEMTIME};
 use windows::Win32::Globalization::{
     DATE_LONGDATE, ENUM_DATE_FORMATS_FLAGS, GetDateFormatEx, GetLocaleInfoEx, GetTimeFormatEx, LOCALE_IFIRSTDAYOFWEEK,
-    LOCALE_SSHORTESTDAYNAME1, TIME_NOSECONDS,
+    LOCALE_SLONGDATE, LOCALE_SSHORTESTDAYNAME1, TIME_NOSECONDS,
 };
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
@@ -243,7 +243,16 @@ impl super::Widget for Clock {
         let label = t("Oggi", "Today");
         let button_w = fonts.width(label, small) + 16.0;
         let button = Rect::new(WIDTH - PAD - button_w, TOP_Y + 2.0, button_w, ROW_H - 4.0);
-        scene.text(Rect::new(PAD + 4.0, TOP_Y, button.x - PAD - 12.0, ROW_H), capitalize(&long_date(&now)), bold, theme.text, Align::Start);
+        let room = button.x - PAD - 12.0;
+        let mut date = capitalize(&long_date(&now));
+        // Without the year when it's too long (`Wednesday, November 11, 2026`): the month's title
+        // just below has it
+        if fonts.width(&date, bold) > room
+            && let Some(short) = long_date_without_year(&now)
+        {
+            date = capitalize(&short);
+        }
+        scene.text(Rect::new(PAD + 4.0, TOP_Y, room, ROW_H), date, bold, theme.text, Align::Start);
         scene.text(button, label, small, theme.primary, Align::Center);
         scene.zone(button, theme.row_radius, "today");
 
@@ -417,7 +426,7 @@ fn weekday(y: i32, m: u32, d: u32) -> u32 {
 /// The region's first day of the week, 0 = Monday … 6 = Sunday.
 fn first_weekday() -> u32 {
     let mut buf = [0u16; 4];
-    let n = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_IFIRSTDAYOFWEEK, Some(&mut buf)) };
+    let n = unsafe { GetLocaleInfoEx(crate::i18n::locale(), LOCALE_IFIRSTDAYOFWEEK, Some(&mut buf)) };
     if n < 2 {
         return 0;
     }
@@ -427,7 +436,7 @@ fn first_weekday() -> u32 {
 /// The shortest name of a day (0 = Monday) in the region's language: `lu`, `Mo`.
 fn day_name(day: u32) -> String {
     let mut buf = [0u16; 16];
-    let n = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_SSHORTESTDAYNAME1 + day, Some(&mut buf)) };
+    let n = unsafe { GetLocaleInfoEx(crate::i18n::locale(), LOCALE_SSHORTESTDAYNAME1 + day, Some(&mut buf)) };
     String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize])
 }
 
@@ -440,8 +449,24 @@ fn month_title(year: i32, month: u32) -> String {
 /// `martedì 10 novembre 2026`: the region's long date.
 fn long_date(t: &SYSTEMTIME) -> String {
     let mut buf = [0u16; 80];
-    let n = unsafe { GetDateFormatEx(PCWSTR::null(), DATE_LONGDATE, Some(t), PCWSTR::null(), Some(&mut buf), PCWSTR::null()) };
+    let n = unsafe { GetDateFormatEx(crate::i18n::locale(), DATE_LONGDATE, Some(t), PCWSTR::null(), Some(&mut buf), PCWSTR::null()) };
     String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize])
+}
+
+/// The region's long date with the year taken out of its pattern (`dddd, MMMM d, yyyy` →
+/// `dddd, MMMM d`); None for a pattern with quoted text, where the year may sit inside words.
+fn long_date_without_year(t: &SYSTEMTIME) -> Option<String> {
+    let mut buf = [0u16; 80];
+    let n = unsafe { GetLocaleInfoEx(crate::i18n::locale(), LOCALE_SLONGDATE, Some(&mut buf)) };
+    let pattern = String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]);
+    if pattern.is_empty() || pattern.contains('\'') {
+        return None;
+    }
+    let picture = pattern.replace('y', "");
+    let picture = picture.trim_matches(|c: char| c == ' ' || c == ',');
+    let mut out = [0u16; 80];
+    let n = unsafe { GetDateFormatEx(crate::i18n::locale(), ENUM_DATE_FORMATS_FLAGS(0), Some(t), &HSTRING::from(picture), Some(&mut out), PCWSTR::null()) };
+    (n > 1).then(|| String::from_utf16_lossy(&out[..n as usize - 1]))
 }
 
 fn parse_day(s: &str) -> Option<(i32, u32, u32)> {
@@ -456,14 +481,14 @@ fn day_url(template: &str, year: i32, month: u32, day: u32) -> String {
 
 pub fn format_date(t: &SYSTEMTIME, picture: &HSTRING) -> String {
     let mut buf = [0u16; 80];
-    let n = unsafe { GetDateFormatEx(PCWSTR::null(), ENUM_DATE_FORMATS_FLAGS(0), Some(t), picture, Some(&mut buf), PCWSTR::null()) };
+    let n = unsafe { GetDateFormatEx(crate::i18n::locale(), ENUM_DATE_FORMATS_FLAGS(0), Some(t), picture, Some(&mut buf), PCWSTR::null()) };
     // The count includes the terminating null
     String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]).replace('.', "")
 }
 
 pub fn format_time(t: &SYSTEMTIME) -> String {
     let mut buf = [0u16; 40];
-    let n = unsafe { GetTimeFormatEx(PCWSTR::null(), TIME_NOSECONDS, Some(t), PCWSTR::null(), Some(&mut buf)) };
+    let n = unsafe { GetTimeFormatEx(crate::i18n::locale(), TIME_NOSECONDS, Some(t), PCWSTR::null(), Some(&mut buf)) };
     String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize])
 }
 

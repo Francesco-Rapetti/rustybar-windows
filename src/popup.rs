@@ -12,7 +12,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, ID2D1DeviceContext,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, ID2D1DeviceContext, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectComposition::{IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2, IDCompositionVisual3};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -430,9 +430,21 @@ impl Drop for Popup {
 
 /// Draws the popup: its background and border, then the scene's shapes in order.
 fn draw(surface: &IDCompositionSurface, s: f32, theme: &Theme, scene: &Scene, fonts: &Fonts) -> Result<()> {
+    gfx::draw(surface, s, |ctx, brush| paint(ctx, brush, s, theme, scene, fonts))
+}
+
+/// A popup's scene as a PNG at `scale`, drawn away from the screen (`rustybar msg shot`).
+pub fn shot(gfx: &Gfx, theme: &Theme, scene: &Scene, fonts: &Fonts, scale: f32, path: &std::path::Path) -> Result<(u32, u32)> {
+    let size = ((scene.width * scale).ceil() as u32, (scene.height * scale).ceil() as u32);
+    gfx.png(size.0, size.1, scale, path, |ctx, brush| paint(ctx, brush, scale, theme, scene, fonts))?;
+    Ok(size)
+}
+
+/// The popup: its background and border, then the scene's shapes, in DIPs at scale `s`.
+fn paint(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, theme: &Theme, scene: &Scene, fonts: &Fonts) {
     let (w, h) = (scene.width, scene.height);
     let colors = scene.backdrop.unwrap_or_else(|| Backdrop::of(theme));
-    gfx::draw(surface, s, |ctx, brush| unsafe {
+    unsafe {
         let b = theme.popup_border;
         let r = (theme.popup_radius - b / 2.0).max(0.0);
         // The border inside the edge, so the popup keeps its size
@@ -470,7 +482,7 @@ fn draw(surface: &IDCompositionSurface, s: f32, theme: &Theme, scene: &Scene, fo
                 }
             }
         }
-    })
+    }
 }
 
 /// A picture stretched over `rect` with rounded corners: a bitmap brush filling the shape.

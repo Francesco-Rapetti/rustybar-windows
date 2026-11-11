@@ -1,7 +1,8 @@
 //! The name of the app in front, from the foreground event that Windows sends out of process (a
 //! hook that injects nothing anywhere), cut at 260 DIPs. The name is the app's own, from the
 //! version information of its executable (`Google Chrome`, `Esplora risorse`), read once per
-//! executable; a UWP app is looked up behind the frame that hosts it.
+//! executable; a UWP app is looked up behind the frame that hosts it. With made-up data (see
+//! `mock`) the name is the `name` of `front_app.json`, whatever app is in front.
 
 use std::collections::HashMap;
 
@@ -22,9 +23,18 @@ pub struct Foreground {
     pub name: String,
 }
 
-#[derive(Default)]
 pub struct FrontApp {
     name: String,
+    mock: bool,
+}
+
+impl FrontApp {
+    pub fn new() -> FrontApp {
+        match crate::mock::load("front_app") {
+            Some(m) => FrontApp { name: m["name"].str().unwrap_or_default().to_string(), mock: true },
+            None => FrontApp { name: String::new(), mock: false },
+        }
+    }
 }
 
 impl super::Widget for FrontApp {
@@ -45,6 +55,7 @@ impl super::Widget for FrontApp {
 
     fn event(&mut self, signal: &super::Signal) -> bool {
         if let super::Signal::Foreground(front) = signal
+            && !self.mock
             && front.name != self.name
         {
             self.name = front.name.clone();

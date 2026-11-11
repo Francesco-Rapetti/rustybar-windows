@@ -848,7 +848,7 @@ impl Docker {
         let inner = TILE - 2.0 * PAD;
         scene.text(Rect::new(x + PAD, y + 8.0, 20.0, 22.0), BOX, Font::icons(16.0), color, Align::Start);
         if let Some((cpu, mb)) = self.usage.get(&c.name).filter(|_| c.state == "running") {
-            scene.text(Rect::new(x + PAD + 22.0, y + 8.0, inner - 22.0, 22.0), format!("{} % · {} MB", crate::i18n::number(*cpu, 1), mb.round()), small, theme.subtext, Align::End);
+            scene.text(Rect::new(x + PAD + 22.0, y + 8.0, inner - 22.0, 22.0), format!("{}% · {} MB", crate::i18n::number(*cpu, 1), mb.round()), small, theme.subtext, Align::End);
         }
         let name = c.name.strip_prefix(&format!("{}-", c.project)).filter(|_| !c.project.is_empty()).unwrap_or(&c.name);
         scene.text(Rect::new(x + PAD, y + 30.0, inner, 18.0), name, Font::new(theme.font_size, Weight::SemiBold), theme.text, Align::Start);
@@ -901,7 +901,7 @@ impl Docker {
             sc.text(Rect::new(MARGIN + PAD + 32.0, y + 28.0, WIDE - 2.0 * PAD - 32.0, 16.0), detail, small, theme.subtext, Align::Start);
             let (cpu, mb) = self.usage.values().fold((0.0, 0.0), |(c, m), (uc, um)| (c + uc, m + um));
             if !self.usage.is_empty() {
-                sc.text(Rect::new(MARGIN + WIDE - PAD - 100.0, y + 9.0, 100.0, 18.0), format!("{} %", crate::i18n::number(cpu, 1)), bold, theme.text, Align::End);
+                sc.text(Rect::new(MARGIN + WIDE - PAD - 100.0, y + 9.0, 100.0, 18.0), format!("{}%", crate::i18n::number(cpu, 1)), bold, theme.text, Align::End);
                 sc.text(Rect::new(MARGIN + WIDE - PAD - 100.0, y + 28.0, 100.0, 16.0), format!("{} MB", mb.round()), small, theme.subtext, Align::End);
             }
         }
@@ -916,7 +916,7 @@ impl Docker {
         }
         for (project, list) in groups {
             if let Some(sc) = scene.as_deref_mut() {
-                let title = if project.is_empty() { "Container".to_string() } else { project.to_string() };
+                let title = if project.is_empty() { t("Container", "Containers").to_string() } else { project.to_string() };
                 let up = list.iter().filter(|c| c.up()).count();
                 sc.text(Rect::new(MARGIN + 4.0, y, 200.0, HEAD_H), format!("{title}  "), bold, theme.text, Align::Start);
                 let tw = fonts.width(&title, bold).ceil();

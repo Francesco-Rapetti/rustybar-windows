@@ -3,7 +3,9 @@
 //! current desktop in the registry (`Explorer\VirtualDesktops`: `VirtualDesktopIDs`,
 //! `CurrentVirtualDesktop`, `Desktops\{id}\Name`), and the registry tells when they change, so the
 //! widget reads them only then. With a single desktop Explorer writes neither, and the widget
-//! hides (`single = true` keeps it).
+//! hides (`single = true` keeps it). With made-up data (see `mock`) the desktops are the
+//! `desktops` of `workspaces.json` and `current` (from 0) the one in front; the registry isn't
+//! read and a click moves the highlight without sending keys.
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Registry::{
@@ -33,10 +35,17 @@ pub struct Workspaces {
     current: Option<usize>,
     /// A listed game is in front: clicks send no keys.
     game: bool,
+    mock: bool,
 }
 
 impl Workspaces {
     pub fn new(options: &Options) -> Workspaces {
+        let single = options.bool("single").unwrap_or(false);
+        if let Some(m) = crate::mock::load("workspaces") {
+            let desktops: Vec<String> = m["desktops"].array().iter().filter_map(|d| d.str().map(str::to_string)).collect();
+            let current = m["current"].f64().map(|c| c as usize).filter(|c| *c < desktops.len());
+            return Workspaces { key: None, event: HANDLE::default(), single, desktops, current, game: false, mock: true };
+        }
         let mut key = HKEY::default();
         let opened = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, KEY, Some(0), KEY_READ | KEY_NOTIFY, &mut key) };
         let key = opened.is_ok().then_some(key);
@@ -44,7 +53,7 @@ impl Workspaces {
             log!("workspaces: no VirtualDesktops key ({opened:?})");
         }
         let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }.unwrap_or_default();
-        let mut w = Workspaces { key, event, single: options.bool("single").unwrap_or(false), desktops: Vec::new(), current: None, game: false };
+        let mut w = Workspaces { key, event, single, desktops: Vec::new(), current: None, game: false, mock: false };
         w.read();
         w.watch();
         w
@@ -129,6 +138,10 @@ impl super::Widget for Workspaces {
         let (Some(target), Some(current)) = (item, self.current) else { return false };
         if target == current || target >= self.desktops.len() || self.game {
             return false;
+        }
+        if self.mock {
+            self.current = Some(target);
+            return true;
         }
         let keys = switch_keys(current, target);
         let sent = unsafe { SendInput(&keys, size_of::<INPUT>() as i32) };

@@ -26,6 +26,9 @@
 //! session is saved; the variables a parent Claude Code passes on (`CLAUDE_*`, `ANTHROPIC_*`) are
 //! removed, so it's always the plain CLI of the config dir. `claude.exe` is found in `path`, on the
 //! PATH, in `~\.local\bin`, or else the newest one the Claude desktop app carries.
+//!
+//! With made-up data (see `mock`) the account is the one of `claude.json` whose `dir` is the
+//! widget's (`~/.claude` by default): nothing runs, and the buttons do nothing.
 
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
@@ -150,6 +153,9 @@ pub struct Claude {
     shown: bool,
     game: bool,
     open: bool,
+    /// With made-up data (see `mock`), the config dir as written in the config, shown in place of
+    /// the real path: nothing is read or run.
+    mock: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -179,7 +185,15 @@ impl Claude {
             shown: true,
             game: false,
             open: false,
+            mock: None,
         };
+        if let Some(m) = crate::mock::load("claude") {
+            let dir = options.str("dir").filter(|d| !d.is_empty()).unwrap_or("~/.claude");
+            // An instance without its account in the file is logged out
+            c.account = Some(m["accounts"].array().iter().find(|a| a["dir"].str().unwrap_or("~/.claude") == dir).map(mock_account).unwrap_or_default());
+            c.mock = Some(dir.replace('/', "\\"));
+            return c;
+        }
         c.schedule(true);
         c
     }
@@ -190,7 +204,7 @@ impl Claude {
     /// a few seconds.
     fn schedule(&mut self, soon: bool) {
         let account = !self.missing && self.account.as_ref().is_none_or(|a| a.logged_in);
-        if self.shown && !self.game && account {
+        if self.shown && !self.game && account && self.mock.is_none() {
             if soon {
                 self.timer.stop();
                 self.timer.start(FIRST, EVERY);
@@ -211,7 +225,7 @@ impl Claude {
 
     /// Starts a job on a worker thread, unless one runs.
     fn start(&mut self, job: Job) {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.mock.is_some() {
             return;
         }
         if !self.path.as_ref().is_some_and(|p| p.is_file()) {
@@ -458,7 +472,10 @@ impl super::Widget for Claude {
             scene.text(Rect::new(r.x + PAD, r.y + 12.0, r.w - 2.0 * PAD, 20.0), text, Font::new(theme.font_size, Weight::SemiBold), color, Align::Start);
             scene.text(Rect::new(r.x + PAD, r.y + 34.0, r.w - 2.0 * PAD, 18.0), detail, small, theme.subtext, Align::Start);
         };
-        let dir = self.dir.clone().unwrap_or_else(|| home().join(".claude")).display().to_string();
+        let dir = match &self.mock {
+            Some(dir) => dir.clone(),
+            None => self.dir.clone().unwrap_or_else(|| home().join(".claude")).display().to_string(),
+        };
         if self.missing {
             note(&mut scene, y, red, t("Claude Code non trovato", "Claude Code not found"), t("Installalo, o indica path nella config", "Install it, or set path in the config"));
         } else if a.is_none() {
@@ -521,6 +538,9 @@ impl super::Widget for Claude {
 
     fn popup_input(&mut self, input: &Input) -> Reply {
         let Input::Action(action) = input else { return Reply::Nothing };
+        if self.mock.is_some() {
+            return Reply::Nothing;
+        }
         match *action {
             "refresh" => {
                 self.start(Job::Read { status: true });
@@ -683,6 +703,27 @@ fn parse_usage(stdout: &str) -> Option<Result<(Window, Window), ()>> {
         }
         Some(Ok((window(&limits["five_hour"]), window(&limits["seven_day"]))))
     })
+}
+
+/// A made-up account of `claude.json` (see `mock`): `at` is how many minutes ago it was read, a
+/// window's `reset` in how many minutes it resets.
+fn mock_account(m: &Json) -> Account {
+    let text = |k: &str| m[k].str().unwrap_or_default().to_string();
+    let window = |w: &Json| {
+        (!w.is_null()).then(|| Window { percent: w["percent"].f64().unwrap_or(0.0).round(), reset: w["reset"].f64().map(|min| now() + (min * 60.0) as i64) })
+    };
+    Account {
+        logged_in: m["logged_in"].bool().unwrap_or(true),
+        email: text("email"),
+        org: text("org"),
+        plan: text("plan"),
+        name: text("name"),
+        session: window(&m["session"]),
+        week: window(&m["week"]),
+        no_limits: m["no_limits"].bool().unwrap_or(false),
+        stale: m["stale"].bool().unwrap_or(false),
+        at: now() - (m["at"].f64().unwrap_or(0.0) * 60.0) as i64,
+    }
 }
 
 /// The account's name, from Claude Code's `.claude.json`.

@@ -1,0 +1,8 @@
+{
+  "accounts": [
+    {"name": "Alex Doe", "email": "alex@example.com", "org": "alex@example.com's Organization", "plan": "max", "at": 2,
+     "session": {"percent": 42, "reset": 177}, "week": {"percent": 31, "reset": 4630}},
+    {"dir": "~/.claude-work", "name": "Alex Doe", "email": "alex@work.example", "org": "Example Inc.", "plan": "team", "at": 0,
+     "session": {"percent": 78, "reset": 95}, "week": {"percent": 46, "reset": 2000}}
+  ]
+}

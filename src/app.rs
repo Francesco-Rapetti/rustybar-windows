@@ -82,6 +82,8 @@ pub const USAGE: &str = "usage: rustybar msg <command>
   reload            reads the config again
   query             the widgets, where their pills are, the screens
   popup <widget>    opens the widget's popup, or closes it if it's open
+  shot <widget|bar[:left,center,right]> <file.png> [scale]
+                    draws the widget's popup, or the pills, into a PNG (not the screen)
   quit              closes the bar";
 
 thread_local! {
@@ -350,12 +352,107 @@ impl App {
                 Ok(()) => "ok".into(),
                 Err(e) => e,
             },
+            ["shot", target, path, rest @ ..] if rest.len() <= 1 => {
+                let scale = match rest.first().map(|s| s.parse::<f32>()) {
+                    Some(Ok(s)) if (0.5..=4.0).contains(&s) => Some(s),
+                    Some(_) => return "the scale goes from 0.5 to 4".into(),
+                    None => None,
+                };
+                match self.shot(target, std::path::Path::new(path), scale) {
+                    Ok((w, h)) => format!("ok {w}x{h}"),
+                    Err(e) => e,
+                }
+            }
             ["quit"] => {
                 unsafe { PostQuitMessage(0) };
                 "ok".into()
             }
             _ => USAGE.into(),
         }
+    }
+
+    /// `rustybar msg shot <target> <file> [scale]`: a widget's popup (or a `⋯` pill's), or with
+    /// `bar` every pill in full one after the other on the theme's darkest color (`bar:right`,
+    /// `bar:left,center`: those groups alone), drawn away from
+    /// the screen into a PNG at `scale` (the first screen's by default). Never a capture of the
+    /// screen: what's behind the bar isn't in it. Made for the made-up data (see `mock`), where
+    /// everything is there at once; a widget whose popup reads something in the background shows
+    /// what it has when the shot is taken.
+    fn shot(&mut self, target: &str, path: &std::path::Path, scale: Option<f32>) -> std::result::Result<(u32, u32), String> {
+        const PAD: f32 = 8.0;
+        const GROUPS: f32 = 24.0;
+        self.frame();
+        let bar = self.bars.iter().position(|b| b.visible).ok_or("no bar shows")?;
+        let scale = scale.unwrap_or(self.bars[bar].scale);
+        let fail = |e: windows::core::Error| format!("{}: {e}", path.display());
+        if let Some(groups) = target.strip_prefix("bar").filter(|g| g.is_empty() || g.starts_with(':')) {
+            let sides = self.measure();
+            let gap = self.theme.item_gap;
+            // `bar` every group, `bar:right` or `bar:left,center` those alone
+            let wanted = |name: &str| groups.is_empty() || groups[1..].split(',').any(|g| g == name);
+            if !["left", "center", "right"].iter().any(|g| wanted(g)) {
+                return Err("bar takes :left, :center, :right, or more of them with commas".into());
+            }
+            let mut places = Vec::new();
+            let mut x = PAD;
+            for (name, group) in [("left", &sides.left), ("center", &sides.center), ("right", &sides.right)] {
+                if !wanted(name) {
+                    continue;
+                }
+                for m in group {
+                    places.push((m, (x * scale).round() / scale));
+                    x += m.width + gap;
+                }
+                if !group.is_empty() {
+                    x += GROUPS - gap;
+                }
+            }
+            let (width, height) = (x - GROUPS + PAD, self.config.bar.height);
+            let y = ((height - self.theme.pill_height) / 2.0 * scale).round() / scale;
+            let theme = &self.theme;
+            let gfx = self.gfx.as_ref().ok_or("no device to draw with")?;
+            let size = ((width * scale).ceil() as u32, (height * scale).ceil() as u32);
+            let backdrop = theme.color("crust").unwrap_or(theme.base);
+            gfx.png(size.0, size.1, scale, path, |ctx, brush| {
+                unsafe {
+                    brush.SetColor(&crate::gfx::color(backdrop));
+                    ctx.FillRectangle(&crate::gfx::rect(0.0, 0.0, width, height), brush);
+                }
+                for (m, x) in &places {
+                    bar::paint_pill(ctx, brush, scale, theme, m, *x, y);
+                }
+            })
+            .map_err(fail)?;
+            gfx.trim();
+            return Ok(size);
+        }
+        let fonts = crate::ui::Fonts::new(&self.theme).map_err(|e| e.to_string())?;
+        let scene = match fit::more_side(target) {
+            Some(side) => self.more_scene(bar, side),
+            None => {
+                let open = self.popup.as_ref().is_some_and(|p| p.widget == target);
+                let theme = &self.theme;
+                let slot = self.widgets.iter_mut().find(|s| s.name == target).ok_or_else(|| format!("unknown widget {target:?}"))?;
+                if !slot.widget.has_popup() {
+                    return Err(format!("{target} has no popup"));
+                }
+                // Opened for the shot alone, as a click would, and closed again
+                if !open {
+                    slot.widget.popup_shown(true);
+                }
+                let scene = slot.widget.popup(theme, &fonts);
+                if !open {
+                    slot.widget.popup_shown(false);
+                    self.dirty = true;
+                }
+                scene
+            }
+        };
+        let scene = scene.ok_or_else(|| format!("{target}: the popup has nothing to show"))?;
+        let gfx = self.gfx.as_ref().ok_or("no device to draw with")?;
+        let size = crate::popup::shot(gfx, &self.theme, &scene, &fonts, scale, path).map_err(fail)?;
+        gfx.trim();
+        Ok(size)
     }
 
     /// `rustybar msg query`: each widget with its kind, side and whether it shows a pill, then

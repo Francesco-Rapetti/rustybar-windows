@@ -1,0 +1,30 @@
+# The bar of the screenshots, on made-up data: every widget, with the files next to this one.
+#
+#   $env:RUSTYBAR_MOCK = "examples\mock"; $env:RUSTYBAR_CONFIG_DIR = "examples\mock"; $env:RUSTYBAR_LOCALE = "en-US"
+#   target\release\rustybar.exe
+#   target\release\rustybar.exe msg shot system docs\screenshots\system.png 2
+#
+# It reserves no room, so it lies over your own bar without moving a window.
+
+[bar]
+reserve = false
+
+[theme]
+# The accent of a fresh Windows, not yours
+primary = "#4cc2ff"
+
+[layout]
+left = ["power", "workspaces", "front_app"]
+center = ["media"]
+right = ["home", "events", "docker", "claude", "claude_work", "network", "audio", "system", "clock"]
+
+[widgets.claude_work]
+type = "claude"
+dir = "~/.claude-work"
+color = "#89b4fa"
+
+[widgets.home]
+server = "http://homeassistant.local:8123"
+
+[widgets.events]
+calendars = [{ name = "Work", color = "sky" }, { name = "Personal", color = "green" }, { name = "Team", color = "mauve" }]

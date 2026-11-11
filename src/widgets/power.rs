@@ -10,6 +10,9 @@
 //! runs in-process (`ExitWindowsEx`, `LockWorkStation`, `SetSuspendState`), with no timer and no
 //! data to follow: the widget costs nothing at rest. The account's full name is read when the
 //! popup opens, with `netapi32.dll` loaded for that alone.
+//!
+//! With made-up data (see `mock`) the name is the `user` of `power.json` and the commands do
+//! nothing, the second click included.
 
 use std::ffi::c_void;
 
@@ -62,11 +65,14 @@ pub struct Power {
     confirm: Option<&'static str>,
     /// The command that Windows refused.
     failed: Option<&'static str>,
+    /// The made-up name, with made-up data (see `mock`).
+    mock: Option<String>,
 }
 
 impl Power {
     pub fn new() -> Power {
-        Power::default()
+        let mock = crate::mock::load("power").map(|m| m["user"].str().unwrap_or_default().to_string());
+        Power { mock, ..Power::default() }
     }
 
     fn lines(&self) -> Vec<Line> {
@@ -119,7 +125,7 @@ impl super::Widget for Power {
     fn popup_shown(&mut self, open: bool) {
         self.confirm = None;
         self.failed = None;
-        self.user = open.then(user_name);
+        self.user = open.then(|| self.mock.clone().unwrap_or_else(user_name));
     }
 
     fn popup(&self, theme: &Theme, fonts: &Fonts) -> Option<Scene> {
@@ -191,6 +197,9 @@ impl super::Widget for Power {
             return Reply::Redraw;
         }
         self.confirm = None;
+        if self.mock.is_some() {
+            return Reply::Close;
+        }
         let done = match action {
             "about" => {
                 process::open("ms-settings:about");

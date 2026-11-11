@@ -16,6 +16,9 @@
 //! Windows has no public way to change the default device: a click on a device uses
 //! `IPolicyConfig`, the undocumented interface that Windows' own sound settings use (as do
 //! EarTrumpet and SoundSwitch), stable since Vista. If it ever fails, the log says so.
+//!
+//! With made-up data (see `mock`) the devices and volumes are those of `audio.json`: Core Audio
+//! isn't used, the sliders and the mute move the made-up volumes alone, the rest does nothing.
 
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -45,6 +48,7 @@ use crate::theme::{Rgba, Theme};
 use crate::ui::{Align, Font, Fonts, Item, Pill, Rect, Scene, Weight};
 use crate::wake::{Timer, Wake};
 use crate::i18n::t;
+use crate::json::Json;
 
 /// How often the battery of a Bluetooth device is read again, in ms.
 const BATTERY_EVERY: i32 = 5 * 60 * 1000;
@@ -272,10 +276,15 @@ pub struct Audio {
     game: bool,
     /// While the popup is open: the devices to switch to.
     lists: Option<(Vec<Device>, Vec<Device>)>,
+    /// With made-up data (see `mock`), the devices of `audio.json`; nothing of Core Audio is used.
+    mock: Option<(Vec<Device>, Vec<Device>)>,
 }
 
 impl Audio {
     pub fn new() -> Audio {
+        if let Some(m) = crate::mock::load("audio") {
+            return Audio::mock(&m);
+        }
         let enumerator: Option<IMMDeviceEnumerator> = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
             .map_err(|e| log!("audio: no Core Audio ({e})"))
             .ok();
@@ -290,9 +299,51 @@ impl Audio {
             shown: true,
             game: false,
             lists: None,
+            mock: None,
         };
         a.attach();
         a
+    }
+
+    /// The widget with the made-up devices of `audio.json`: `outputs` and `inputs` (`name`,
+    /// `form` as `EndpointFormFactor`, `bluetooth`, `battery`, `default`), `output_volume` and
+    /// `input_volume` in percent, `output_muted` and `input_muted`.
+    fn mock(m: &Json) -> Audio {
+        let mut endpoints = [None, None];
+        let mut lists = [Vec::new(), Vec::new()];
+        for (i, (key, prefix)) in [("outputs", "out"), ("inputs", "in")].into_iter().enumerate() {
+            for (n, d) in m[key].array().iter().enumerate() {
+                let device = Device {
+                    id: format!("{prefix}{n}"),
+                    name: d["name"].str().unwrap_or_default().to_string(),
+                    form: d["form"].f64().unwrap_or(1.0) as u32,
+                    bluetooth: d["bluetooth"].bool().unwrap_or(false),
+                };
+                if d["default"].bool() == Some(true) {
+                    let level = m[if i == 0 { "output_volume" } else { "input_volume" }].f64().unwrap_or(50.0) as f32 / 100.0;
+                    let muted = m[if i == 0 { "output_muted" } else { "input_muted" }].bool().unwrap_or(false);
+                    let battery = d["battery"].f64().map(|b| b as u8);
+                    endpoints[i] = Some(Endpoint { device: device.clone(), volume: None, callback: None, level, muted, battery });
+                }
+                lists[i].push(device);
+            }
+            lists[i].sort_by_key(|d| d.name.to_lowercase());
+        }
+        let [output, input] = endpoints;
+        let [outputs, inputs] = lists;
+        Audio {
+            enumerator: None,
+            wake: Wake::new(),
+            changed: Arc::new(AtomicBool::new(false)),
+            client: None,
+            output,
+            input,
+            battery_timer: Timer::new(),
+            shown: true,
+            game: false,
+            lists: None,
+            mock: Some((outputs, inputs)),
+        }
     }
 
     /// Registers with Core Audio and reads everything.
@@ -448,6 +499,9 @@ impl super::Widget for Audio {
     }
 
     fn event(&mut self, signal: &Signal) -> bool {
+        if self.mock.is_some() {
+            return false;
+        }
         match signal {
             Signal::Shown(shown) if *shown != self.shown => {
                 self.shown = *shown;
@@ -480,6 +534,10 @@ impl super::Widget for Audio {
     }
 
     fn popup_shown(&mut self, open: bool) {
+        if let Some(lists) = &self.mock {
+            self.lists = open.then(|| lists.clone());
+            return;
+        }
         if open {
             self.lists = Some(self.list_devices());
             for e in [&mut self.output, &mut self.input].into_iter().flatten() {
@@ -538,6 +596,9 @@ impl super::Widget for Audio {
     }
 
     fn popup_input(&mut self, input: &Input) -> Reply {
+        if self.mock.is_some() {
+            return self.mock_input(input);
+        }
         match input {
             Input::Slide(action, fraction) => {
                 let endpoint = match *action {
@@ -578,6 +639,30 @@ impl super::Widget for Audio {
                 self.changed.store(true, Ordering::Release);
                 self.wake.set();
                 Reply::Nothing
+            }
+            _ => Reply::Nothing,
+        }
+    }
+}
+
+impl Audio {
+    /// With made-up data the sliders and the mute move the made-up volumes alone, and the rest
+    /// does nothing: no device of the PC is touched.
+    fn mock_input(&mut self, input: &Input) -> Reply {
+        fn endpoint(a: &mut Audio, output: bool) -> Option<&mut Endpoint> {
+            if output { a.output.as_mut() } else { a.input.as_mut() }
+        }
+        match input {
+            Input::Slide(action, fraction) if matches!(*action, "out-volume" | "in-volume") => {
+                let Some(e) = endpoint(self, *action == "out-volume") else { return Reply::Nothing };
+                e.level = ((fraction * 100.0).round() / 100.0).clamp(0.0, 1.0);
+                e.muted &= e.level == 0.0;
+                Reply::Redraw
+            }
+            Input::Action(action) if matches!(*action, "out-mute" | "in-mute") => {
+                let Some(e) = endpoint(self, *action == "out-mute") else { return Reply::Nothing };
+                e.muted = !e.muted;
+                Reply::Redraw
             }
             _ => Reply::Nothing,
         }

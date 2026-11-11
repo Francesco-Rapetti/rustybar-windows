@@ -21,6 +21,9 @@
 //!
 //! What only the popup needs (the processes, the disks, the apps' names) is made when it opens
 //! and dropped when it closes.
+//!
+//! With made-up data (see `mock`) everything comes from `system.json` (sizes in GB, shares in
+//! percent): nothing is read, no timer runs, the switch works and the buttons do nothing.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -31,6 +34,7 @@ use windows::core::PCWSTR;
 use super::{Input, Reply, Signal, front_app};
 use crate::config::Options;
 use crate::i18n::{number, size, t};
+use crate::json::Json;
 use crate::log;
 use crate::process;
 use crate::stats::{self, App, CpuShare, CpuTimes, Disk, Gpu, Memory, Processes};
@@ -111,10 +115,22 @@ pub struct System {
     game: bool,
     list: List,
     open: Option<Open>,
+    mock: Option<Mock>,
+}
+
+/// What the made-up popup shows (see `mock`).
+struct Mock {
+    apps: Vec<App>,
+    names: HashMap<String, String>,
+    disks: Vec<Disk>,
+    video_memory: u64,
 }
 
 impl System {
     pub fn new(options: &Options) -> System {
+        if let Some(m) = crate::mock::load("system") {
+            return System::mock(options, &m);
+        }
         let timer = unsafe { CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0) }.unwrap_or_else(|e| {
             log!("system timer: {e}");
             HANDLE::default()
@@ -143,10 +159,65 @@ impl System {
             game: false,
             list: List::Cpu,
             open: None,
+            mock: None,
         };
         s.temperature = s.gpu.as_ref().and_then(Gpu::temperature);
         s.schedule();
         s
+    }
+
+    /// The widget with the made-up data of `system.json`, and no timer.
+    fn mock(options: &Options, m: &Json) -> System {
+        const GB: f64 = (1u64 << 30) as f64;
+        let bytes = |v: &Json| (v.f64().unwrap_or(0.0) * GB) as u64;
+        let share = |k: &str| m["cpu"][k].f64().unwrap_or(0.0) / 100.0;
+        let (kernel, user) = (share("system"), share("user"));
+        let memory = Memory { total: bytes(&m["memory"]["total"]), available: bytes(&m["memory"]["total"]).saturating_sub(bytes(&m["memory"]["used"])), committed: bytes(&m["memory"]["committed"]), commit_limit: bytes(&m["memory"]["limit"]) };
+        let g = &m["gpu"];
+        let gpu = (!g.is_null() && options.bool("gpu").unwrap_or(true)).then(|| Gpu::mock(g["name"].str().unwrap_or_default().to_string(), bytes(&g["dedicated"]), g["hot"].f64().map(|t| t as f32)));
+        let history = |k: &str| m[k].array().iter().map(|v| percent(v.f64().unwrap_or(0.0))).collect::<Vec<u32>>();
+        let (cpu, gpu_history) = (history("cpu_history"), history("gpu_history"));
+        let history: VecDeque<(u64, u32, Option<u32>)> = cpu.iter().enumerate().map(|(i, c)| (i as u64, *c, gpu_history.get(i).copied())).collect();
+        let mut names = HashMap::new();
+        let apps = m["apps"]
+            .array()
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let exe = a["exe"].str().unwrap_or_default().to_lowercase();
+                names.insert(exe.clone(), a["name"].str().unwrap_or_default().to_string());
+                App { exe, pid: i as u32, cpu: a["cpu"].f64().unwrap_or(0.0), memory: bytes(&a["memory"]) }
+            })
+            .collect();
+        let disks = m["disks"]
+            .array()
+            .iter()
+            .map(|d| Disk { root: d["root"].str().unwrap_or_default().to_string(), label: d["label"].str().unwrap_or_default().to_string(), total: bytes(&d["total"]), free: bytes(&d["free"]) })
+            .collect();
+        System {
+            timer: HANDLE::default(),
+            period: None,
+            interval: 5000,
+            warning: options.f64("warning").unwrap_or(75.0),
+            critical: options.f64("critical").unwrap_or(90.0),
+            disk_warning: options.f64("disk_warning").unwrap_or(90.0),
+            disk_critical: options.f64("disk_critical").unwrap_or(95.0),
+            logical: m["logical"].f64().unwrap_or(16.0) as u32,
+            cores: m["cores"].f64().unwrap_or(8.0) as u32,
+            gpu,
+            times: None,
+            share: Some(CpuShare { kernel, user, idle: (1.0 - kernel - user).max(0.0) }),
+            memory: Some(memory),
+            gpu_use: g["use"].f64(),
+            temperature: g["temperature"].f64().map(|t| t as f32),
+            readings: history.len() as u64,
+            history,
+            shown: true,
+            game: false,
+            list: List::Cpu,
+            open: None,
+            mock: Some(Mock { apps, names, disks, video_memory: bytes(&g["used"]) }),
+        }
     }
 
     fn timer_ok(&self) -> bool {
@@ -252,7 +323,7 @@ impl System {
 
     /// The numbers don't move: a listed game is in front, and the popup isn't open.
     fn paused(&self) -> bool {
-        self.period.is_none()
+        self.period.is_none() && self.mock.is_none()
     }
 
     fn level(&self, theme: &Theme, v: u32, normal: Rgba) -> Rgba {
@@ -338,6 +409,9 @@ impl super::Widget for System {
     }
 
     fn event(&mut self, signal: &Signal) -> bool {
+        if self.mock.is_some() {
+            return false;
+        }
         let before = self.shown_values();
         match signal {
             Signal::Shown(shown) => self.shown = *shown,
@@ -369,6 +443,18 @@ impl super::Widget for System {
     }
 
     fn popup_shown(&mut self, open: bool) {
+        if let Some(m) = &self.mock {
+            self.open = open.then(|| Open {
+                processes: Processes::new(self.logical),
+                apps: m.apps.clone(),
+                cpu_known: true,
+                disks: m.disks.clone(),
+                video_memory: m.video_memory,
+                names: m.names.clone(),
+                readings: 0,
+            });
+            return;
+        }
         if open {
             let mut processes = Processes::new(self.logical);
             let apps = processes.read().unwrap_or_default();
@@ -491,6 +577,7 @@ impl super::Widget for System {
                 self.list = list;
                 Reply::Redraw
             }
+            _ if self.mock.is_some() => Reply::Nothing,
             "taskmgr" => {
                 process::open("taskmgr.exe");
                 Reply::Opened

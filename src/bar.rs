@@ -11,7 +11,7 @@ use std::sync::Once;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
-use windows::Win32::Graphics::Direct2D::{D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT};
+use windows::Win32::Graphics::Direct2D::{D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1DeviceContext, ID2D1SolidColorBrush};
 use windows::Win32::Graphics::DirectComposition::{IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2};
 use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONULL, MonitorFromWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Result, w};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::app::{Event, push};
 use crate::gfx::{self, Gfx};
@@ -501,23 +501,50 @@ impl Drop for Bar {
 }
 
 fn draw_background(surface: &IDCompositionSurface, s: f32, theme: &Theme, size: (u32, u32)) -> Result<()> {
-    let (w, h) = (size.0 as f32 / s, size.1 as f32 / s);
-    gfx::draw(surface, s, |ctx, brush| unsafe {
-        let b = theme.pill_border;
-        // The border inside the pill's edge, so the pill keeps its size
-        let shape = D2D1_ROUNDED_RECT { rect: gfx::rect(b / 2.0, b / 2.0, w - b, h - b), radiusX: theme.pill_radius - b / 2.0, radiusY: theme.pill_radius - b / 2.0 };
+    gfx::draw(surface, s, |ctx, brush| paint_background(ctx, brush, theme, size.0 as f32 / s, size.1 as f32 / s))
+}
+
+fn paint_background(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, theme: &Theme, w: f32, h: f32) {
+    let b = theme.pill_border;
+    // The border inside the pill's edge, so the pill keeps its size
+    let shape = D2D1_ROUNDED_RECT { rect: gfx::rect(b / 2.0, b / 2.0, w - b, h - b), radiusX: theme.pill_radius - b / 2.0, radiusY: theme.pill_radius - b / 2.0 };
+    unsafe {
         brush.SetColor(&gfx::color(theme.base));
         ctx.FillRoundedRectangle(&shape, brush);
         if b > 0.0 {
             brush.SetColor(&gfx::color(theme.surface));
             ctx.DrawRoundedRectangle(&shape, brush, b, None);
         }
-    })
+    }
+}
+
+/// A whole pill at `x`, `y` (DIPs, on whole pixels at scale `s`): its background, its highlight
+/// and its text, as the bar composes them. For `rustybar msg shot bar`.
+pub fn paint_pill(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, theme: &Theme, m: &Measured, x: f32, y: f32) {
+    let height = theme.pill_height;
+    unsafe {
+        ctx.SetTransform(&Matrix3x2::translation(x, y));
+        if !m.pill.bare {
+            paint_background(ctx, brush, theme, m.width, height);
+        }
+        if let Some(item) = m.pill.highlight.and_then(|i| m.items.get(i)) {
+            let h = height - 2.0 * HIGHLIGHT_Y;
+            let tile = gfx::rect(((item.x - HIGHLIGHT_X) * s).round() / s, (HIGHLIGHT_Y * s).round() / s, item.width + 2.0 * HIGHLIGHT_X, h);
+            brush.SetColor(&gfx::color(theme.primary));
+            ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: tile, radiusX: h / 2.0, radiusY: h / 2.0 }, brush);
+        }
+        paint_text(ctx, brush, s, theme, m);
+        ctx.SetTransform(&Matrix3x2::identity());
+    }
 }
 
 fn draw_text(surface: &IDCompositionSurface, s: f32, theme: &Theme, m: &Measured) -> Result<()> {
+    gfx::draw(surface, s, |ctx, brush| paint_text(ctx, brush, s, theme, m))
+}
+
+fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, theme: &Theme, m: &Measured) {
     let height = theme.pill_height;
-    gfx::draw(surface, s, |ctx, brush| unsafe {
+    unsafe {
         for (item, placed) in m.pill.items.iter().zip(&m.items) {
             brush.SetColor(&gfx::color(item.color));
             let x = placed.x + placed.text_x;
@@ -531,7 +558,7 @@ fn draw_text(surface: &IDCompositionSurface, s: f32, theme: &Theme, m: &Measured
             let y = ((height - placed.text_height) / 2.0 * s).round() / s;
             ctx.DrawTextLayout(Vector2 { X: (x * s).round() / s, Y: y }, &placed.layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
-    })
+    }
 }
 
 /// The tile under the highlighted item: drawn when its size or color change, slid along when the

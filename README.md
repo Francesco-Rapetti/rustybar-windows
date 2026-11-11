@@ -22,6 +22,10 @@ the same ideas, built on Windows' own pieces.
   screen; with every bar hidden, the bar lets go of its devices and sleeps until the game leaves.
   Listed games turn animations off even in a window.
 
+![The left end of the bar: the Windows logo, the virtual desktops, the app in front, and what's playing](docs/screenshots/bar-left.png)
+
+![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the network with a VPN, the sound with the headphones' battery, CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
+
 ## What it costs
 
 Measured with `scripts\measure.ps1` on Windows 11 (5120×1440 and 1920×1080 screens; workspaces,
@@ -86,6 +90,8 @@ to that app, and the bar wouldn't start with Windows. Other commands:
   rustybar msg reload            read the config again
   rustybar msg query             the widgets, where their pills are on each screen
   rustybar msg popup <widget>    open its popup on the screen with the mouse, or close it
+  rustybar msg shot <what> <file.png> [scale]
+                                 draw a popup, or the pills, into a PNG (see Made-up data)
   rustybar msg quit              close the bar
   ```
 
@@ -114,6 +120,9 @@ Environment variables:
   with its own log (`rustybar-<dir name>.log`); with `[bar] reserve = false` it doesn't move the
   windows.
 - `RUSTYBAR_GPU=hardware`: draw with the GPU instead of WARP (see above).
+- `RUSTYBAR_LOCALE`: another language and region for the texts, dates and numbers (`en-US`,
+  `it-IT`), instead of Windows'.
+- `RUSTYBAR_MOCK`: made-up data (see below).
 
 ### When the bar doesn't fit
 
@@ -129,6 +138,30 @@ screen, it costs a sum and nothing more is measured. `rustybar msg query` says w
 and what's in `⋯`, and `rustybar msg popup ⋯left` (or `⋯right`) opens that popup.
 
 ## Widgets
+
+Each popup, on made-up data (see [Made-up data](#made-up-data)):
+
+<table>
+<tr>
+<td align="center" valign="top"><img src="docs/screenshots/system.png" width="344" alt="CPU and GPU with the last readings as bars and the GPU's temperature, memory, video memory, two disks (the second nearly full, in yellow), and the apps that use the most CPU"><br><code>system</code></td>
+<td align="center" valign="top"><img src="docs/screenshots/network.png" width="344" alt="The Wi-Fi connection with its signal, band and generation, download and upload with the last 30 seconds as bars, a VPN, the Wi-Fi networks to join, and the details: local IP, router with its ping, DNS, MAC and IPv6"><br><code>network</code></td>
+</tr>
+<tr>
+<td align="center" valign="top"><img src="docs/screenshots/audio.png" width="320" alt="Output and input volume with sliders, then the outputs and inputs to switch to, the Bluetooth headphones with their battery"><br><code>audio</code></td>
+<td align="center" valign="top"><img src="docs/screenshots/media.png" width="320" alt="A player in the colors of its cover, navy with pink controls: a switch between three apps, the cover, title, artist and app, a bar to seek, shuffle, previous, pause, next and repeat, and the app's volume"><br><code>media</code></td>
+</tr>
+<tr>
+<td align="center" valign="top"><img src="docs/screenshots/claude.png" width="344" alt="A Claude account with its plan, the session and the week with a bar each, when they reset and how long until then"><br><code>claude</code></td>
+<td align="center" valign="top"><img src="docs/screenshots/clock.png" width="260" alt="A calendar of the month, today in a dot"><br><code>clock</code><br><br><img src="docs/screenshots/power.png" width="248" alt="The power menu: About this PC, Task Manager, Settings, Sleep, Restart, Shut down, Lock, Sign out, RustyBar config"><br><code>power</code></td>
+</tr>
+<tr>
+<td align="center" valign="top"><img src="docs/screenshots/home.png" width="324" alt="Home Assistant tiles: lights with a brightness slider, a blind, the air conditioner with its modes and target, the 3D printer printing, a vacuum, scripts and scenes"><br><code>home</code></td>
+<td align="center" valign="top"><img src="docs/screenshots/docker.png" width="324" alt="Docker containers by Compose project, each with its state, CPU and memory, image, ports and buttons, then the disk space to clean up"><br><code>docker</code></td>
+</tr>
+<tr>
+<td align="center" valign="top" colspan="2"><img src="docs/screenshots/events.png" width="324" alt="The next event in a tile with its calendar, room, guests and Join Google Meet, an all-day event as a chip, then the day with a red line at the time it is now"><br><code>events</code></td>
+</tr>
+</table>
 
 - **clock**: the date and time in the formats of Windows (`Mar 10/11  21:13`). Its popup is a
   calendar, a month at a time: today in a dot, the week from the region's first day, the weekend
@@ -235,6 +268,29 @@ and what's in `⋯`, and `rustybar msg popup ⋯left` (or `⋯right`) opens that
 
 `rustybar secret set|delete|check <name>` keeps the secrets of the widgets in Credential Manager
 (as `rustybar-<name>`), from stdin, so they never go through the command line or a file.
+
+## Made-up data
+
+With `RUSTYBAR_MOCK` set to a folder, every widget but the clock reads `<folder>/<widget>.json`
+instead of your PC, for screenshots and demos: no server is asked, no account, device or network
+read. What a click would do to the PC does nothing; the sliders, the switches and the player move
+the made-up data alone. [examples/mock](examples/mock) has a file for each widget, the covers of
+the player, and a `rustybar.toml` with every widget in the layout that reserves no room, so it can
+run over your own bar:
+
+```powershell
+$env:RUSTYBAR_MOCK = "examples\mock"; $env:RUSTYBAR_CONFIG_DIR = "examples\mock"; $env:RUSTYBAR_LOCALE = "en-US"
+target\release\rustybar.exe
+target\release\rustybar.exe msg shot system docs\screenshots\system.png 2 | Out-Host
+target\release\rustybar.exe msg shot bar:right docs\screenshots\bar-right.png 2 | Out-Host
+target\release\rustybar.exe msg quit | Out-Host
+```
+
+`rustybar msg shot` is how the screenshots above are made: the bar draws a widget's popup (as if
+it had just opened), a `⋯` popup, or its pills in full one after the other (`bar`, or some groups:
+`bar:left,center`, `bar:right`) into a PNG, at the scale given (the screen's by default). It draws
+away from the screen with the same code as the bar, so nothing of the desktop or of other windows
+ends up in the picture.
 
 ## Themes
 
