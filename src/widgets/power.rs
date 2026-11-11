@@ -108,7 +108,8 @@ impl Power {
 
 impl super::Widget for Power {
     fn pill(&self, theme: &Theme) -> Option<Pill> {
-        Some(Pill::new(vec![Item::windows_logo(theme.text)]))
+        // No background: the logo stands on the desktop, as the apple in the macOS menu bar
+        Some(Pill::new(vec![Item::windows_logo(theme.text)]).bare())
     }
 
     fn has_popup(&self) -> bool {

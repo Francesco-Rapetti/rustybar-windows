@@ -172,9 +172,10 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
 - `bar.rs`: una barra per schermo (`WS_EX_NOREDIRECTIONBITMAP`, topmost, senza attivazione),
   AppBar registrata dopo il primo frame (Explorer ci mette ~200 ms a spostare le finestre),
   `fullscreen_here` (finestra in primo piano che copre lo schermo senza barra del titolo, o
-  `QUNS_RUNNING_D3D_FULL_SCREEN`). Per pill un visual con lo sfondo come contenuto, l'evidenziazione
-  e il testo in visual figli; firme per ridisegnare solo ciò che cambia; scivolamenti con
-  `Gfx::slide` (cubica ease-out eseguita da DWM).
+  `QUNS_RUNNING_D3D_FULL_SCREEN`). Per pill un visual con lo sfondo come contenuto (nessuna
+  superficie per una pill `bare`), l'evidenziazione e il testo in visual figli; firme per
+  ridisegnare solo ciò che cambia; scivolamenti con `Gfx::slide` (cubica ease-out eseguita da
+  DWM).
 - Clic e popup: la barra (`WS_EX_NOACTIVATE`, `MA_NOACTIVATE`) manda `WM_LBUTTONDOWN` come
   `Event::Click`; `Bar::hit` trova la pill e l'elemento della pill dalla sola x (vale tutta
   l'altezza, fino al bordo dello schermo; ogni elemento con metà dello spazio ai lati). Una pill
@@ -197,7 +198,8 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   (`Action`, `Wheel`, `Key` → `Reply`: `Nothing`, `Redraw`, `Close`, `Opened`).
 - `gfx.rs` (D3D11 WARP, D2D, DirectComposition, `draw` in DIP alla scala dello schermo), `ui.rs`
   (`Pill` di `Item` di testo, misurati con DirectWrite: `small`, `fixed` = largo almeno quanto un
-  testo modello e allineato a sinistra, `space` = spazio prima dell'item; `Scene` e `Fonts` dei
+  testo modello e allineato a sinistra, `space` = spazio prima dell'item; `Pill::bare` = senza
+  sfondo né bordo, stessa misura e stessa area del clic, anche nel popup ⋯; `Scene` e `Fonts` dei
   popup, `Backdrop` per i colori propri di un popup), `palette.rs` (i colori di un'immagine in
   Oklab, per il popup di `media`), `theme.rs` (le 24 palette copiate dalla versione macOS + `windows` dal registro:
   `AppsUseLightTheme`, `Accent\AccentPalette`; `level` per giallo e rosso, `tile` per i riquadri
@@ -530,8 +532,10 @@ decisione) e il Wi-Fi acceso e spento, di `audio` il collegamento dei dispositiv
   non costano nulla. Per distinguere i due orologi un testo fra apici nella data: `date = "'Tokyo'"`.
   Calendario, «Oggi» e mezzanotte nel fuso dell'orologio.
 - `power` (fatto, confermato con l'utente col mockup: secondo clic, nome dell'account, primo a
-  sinistra nel layout predefinito): pill col logo di Windows nel colore del testo, come la mela
-  su macOS (chiesto dall'utente l'11/11/2026 al posto del tasto d'accensione `E7E8`). Nessun font
+  sinistra nel layout predefinito): il logo di Windows nel colore del testo, come la mela su
+  macOS (chiesto dall'utente l'11/11/2026 al posto del tasto d'accensione `E7E8`), da solo sul
+  desktop senza sfondo né bordo (`Pill::bare`, chiesto dall'utente l'11/11/2026, come `apple` su
+  macOS: la pill tiene la sua misura, quindi posizione e clic restano). Nessun font
   di sistema lo ha (Segoe Fluent Icons no, Wingdings solo la vecchia bandiera), quindi lo si
   disegna: `Item::windows_logo` (misurato come il glifo `E8A9` della stessa misura) e
   `ui::logo`, quattro quadrati grandi quanto `font_size`, uno spazio di 1/12 (almeno 1 px),
@@ -846,3 +850,12 @@ la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
   centrati); installata la barra nuova e aggiunto `power` in testa a sinistra nella config vera
   dell'utente (ricaricata da sola, `msg query` lo mostra). Non visto: le scale 125–200% a occhio
   (il test controlla i pixel).
+- 11/11/2026, **`power` senza sfondo** (chiesto dall'utente, in una sessione nuova): `Pill::bare`,
+  nella firma dello sfondo; la pill `bare` non ha la superficie dello sfondo (una in meno da
+  tenere). Barra di prova sullo schermo principale (`reserve = false`, `margin = 1200`): logo
+  bianco netto sul desktop, nessuno sfondo né bordo, pill di 34×28 px nello stesso posto, accanto
+  a `clock` con la sua pill. Popup ⋯ (`margin = 2459` e un orologio al centro, così `power` e
+  `clock` finiscono nel ⋯): il logo da solo e l'orologio con sfondo e bordo. Nota per le prove
+  del ⋯: col margine il popup resta a `margin` dai bordi dello schermo, quindi con un margine
+  enorme non c'è posto e non si apre (`msg popup` dice comunque `ok`). Non visti: il tema chiaro
+  (il logo nel colore del testo scuro sul desktop) e una scala diversa dal 100%.

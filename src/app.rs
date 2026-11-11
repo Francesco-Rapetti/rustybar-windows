@@ -1162,10 +1162,11 @@ fn fit_bar(width: f32, state: &mut Fitted, full: &Sides, compact: &HashMap<Strin
 /// highlight, the text.
 fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
     let b = t.pill_border;
-    if b > 0.0 {
+    // A bare pill has its items alone, as on the bar
+    if !m.pill.bare && b > 0.0 {
         scene.fill(Rect::new(x, y, m.width, t.pill_height), t.pill_radius, t.surface);
         scene.fill(Rect::new(x + b, y + b, m.width - 2.0 * b, t.pill_height - 2.0 * b), (t.pill_radius - b).max(0.0), t.base);
-    } else {
+    } else if !m.pill.bare {
         scene.fill(Rect::new(x, y, m.width, t.pill_height), t.pill_radius, t.base);
     }
     if let Some(p) = m.pill.highlight.and_then(|i| m.items.get(i)) {

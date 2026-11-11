@@ -86,11 +86,20 @@ pub struct Pill {
     /// The item under the highlight, a rounded tile in the primary color that slides from one
     /// item to the next.
     pub highlight: Option<usize>,
+    /// Drawn without the background and the border: the items stand on the desktop alone, as
+    /// the Apple logo does in the macOS menu bar. The pill keeps its size, so its place and the
+    /// area that takes a click stay the same.
+    pub bare: bool,
 }
 
 impl Pill {
     pub fn new(items: Vec<Item>) -> Pill {
-        Pill { items, gap: 6.0, highlight: None }
+        Pill { items, gap: 6.0, highlight: None, bare: false }
+    }
+
+    pub fn bare(mut self) -> Pill {
+        self.bare = true;
+        self
     }
 
     pub fn gap(mut self, gap: f32) -> Pill {

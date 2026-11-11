@@ -1,8 +1,9 @@
 //! One bar per screen: a window at the top that reserves its strip as an AppBar (maximized windows
 //! stop under it, as with the taskbar) and hides itself while an app is full screen there. What it
-//! shows is a DirectComposition tree: per pill a visual whose content is the background, with the
-//! text in a child visual, so that a new minute redraws only the text; a pill that moves, and the
-//! highlight inside one, slide to their place with an animation DWM runs by itself.
+//! shows is a DirectComposition tree: per pill a visual whose content is the background (none for
+//! a bare pill), with the text in a child visual, so that a new minute redraws only the text; a
+//! pill that moves, and the highlight inside one, slide to their place with an animation DWM runs
+//! by itself.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -65,7 +66,8 @@ struct Highlight {
 
 struct PillVisual {
     visual: IDCompositionVisual2,
-    background: IDCompositionSurface,
+    /// The background's surface, made when the pill has one (a bare pill has none).
+    background: Option<IDCompositionSurface>,
     text_visual: IDCompositionVisual2,
     text: IDCompositionSurface,
     size: (u32, u32),
@@ -338,7 +340,7 @@ impl Bar {
             let size = (size, (theme.pill_height * s).round() as u32);
             let background_sig = {
                 let mut h = DefaultHasher::new();
-                (background, size).hash(&mut h);
+                (background, size, m.pill.bare).hash(&mut h);
                 h.finish()
             };
             let text_sig = {
@@ -351,9 +353,7 @@ impl Bar {
                 unsafe {
                     let visual = gfx.dcomp.CreateVisual()?;
                     let text_visual = gfx.dcomp.CreateVisual()?;
-                    let background = gfx.surface(size.0, size.1)?;
                     let text = gfx.surface(size.0, size.1)?;
-                    visual.SetContent(&background)?;
                     text_visual.SetContent(&text)?;
                     visual.AddVisual(&text_visual, true, None)?;
                     visual.SetOffsetX2(left)?;
@@ -363,7 +363,7 @@ impl Bar {
                         m.key.clone(),
                         PillVisual {
                             visual,
-                            background,
+                            background: None,
                             text_visual,
                             text,
                             size,
@@ -381,18 +381,31 @@ impl Bar {
             // Each item, half the gap on either side, so a click between two goes to the nearer
             pv.items = m.items.iter().map(|p| (((p.x - m.pill.gap / 2.0) * s).round(), ((p.width + m.pill.gap) * s).round())).collect();
             if pv.size != size {
-                pv.background = gfx.surface(size.0, size.1)?;
                 pv.text = gfx.surface(size.0, size.1)?;
-                unsafe {
-                    pv.visual.SetContent(&pv.background)?;
-                    pv.text_visual.SetContent(&pv.text)?;
-                }
+                unsafe { pv.text_visual.SetContent(&pv.text)? };
+                // The background is made again at the new size just below
+                pv.background = None;
                 pv.size = size;
                 pv.background_sig = 0;
                 pv.text_sig = 0;
             }
             if pv.background_sig != background_sig {
-                draw_background(&pv.background, s, theme, size)?;
+                if m.pill.bare {
+                    // Nothing under the text: no surface is kept for it
+                    pv.background = None;
+                    unsafe { pv.visual.SetContent(None::<&windows::core::IUnknown>)? };
+                } else {
+                    let surface = match pv.background.take() {
+                        Some(surface) => surface,
+                        None => {
+                            let surface = gfx.surface(size.0, size.1)?;
+                            unsafe { pv.visual.SetContent(&surface)? };
+                            surface
+                        }
+                    };
+                    draw_background(&surface, s, theme, size)?;
+                    pv.background = Some(surface);
+                }
                 pv.background_sig = background_sig;
             }
             if pv.text_sig != text_sig {
