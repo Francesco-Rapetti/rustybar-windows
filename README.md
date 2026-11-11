@@ -69,7 +69,10 @@ target\release\rustybar.exe install
 - lists it in Settings > Apps, whose *Uninstall* runs `rustybar uninstall`;
 - adds a *RustyBar* shortcut to the Start menu, and starts the bar.
 
-`rustybar uninstall` undoes all of it and leaves the config and the logs. Other commands:
+`rustybar uninstall` undoes all of it and leaves the config and the logs. Both do their work in
+a second run started by File Explorer, as the bar is at sign-in: from the terminal of an app
+package (the Claude app's, for one) Windows would keep the registry, and maybe the config, private
+to that app, and the bar wouldn't start with Windows. Other commands:
 
 - `rustybar quit` closes the running bar (of the same config dir); the Start menu shortcut
   starts it again.

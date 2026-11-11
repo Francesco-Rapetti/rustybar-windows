@@ -121,6 +121,17 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   `%LOCALAPPDATA%\Programs\RustyBar\rustybar.exe` con la config di `%APPDATA%\rustybar`, e parte
   con Windows. Per provarne una nuova build: `target\release\rustybar.exe install` (chiude quella
   installata, la sostituisce e la riavvia); l'utente può star giocando, quindi chiedere prima.
+- **Le sessioni dell'app Claude girano dentro il suo pacchetto MSIX**, e Windows tiene per il
+  pacchetto parte di quello che i loro processi scrivono: il registro `HKCU\Software` sempre
+  (anche senza identità di pacchetto: `GetCurrentPackageFullName` dice 15700 e una chiave scritta
+  da qui da fuori non si vede), le cartelle nuove sotto `%APPDATA%`/`%LOCALAPPDATA%` a volte
+  (finiscono in `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\…`). Da qui si vede la
+  fusione delle due cose, quindi sembra tutto a posto anche quando non lo è: per sapere cosa vede
+  il PC vero bisogna guardare da un processo avviato da Esplora risorse (`explorer.exe <file>`:
+  uno script `.vbs` che scrive il risultato in un file della cartella utente, poi cancellati). Le
+  scritture in `%TEMP%` e nelle cartelle che esistono già vanno nel posto vero. Per questo
+  `rustybar install` fa sempre il lavoro in un processo avviato da Esplora risorse, e i processi
+  avviati da qui (barre di prova comprese) muoiono con la sessione se restano nel suo job.
 - Barra di prova accanto a quella vera: una cartella con un `rustybar.toml` con
   `[bar] reserve = false` (non sposta le finestre), poi `RUSTYBAR_CONFIG_DIR=<cartella>` e
   `target\release\rustybar.exe`; con la stessa variabile `rustybar quit` chiude lei sola (le
@@ -541,3 +552,17 @@ dati.
   copia parcheggiata), reinstallazione (config lasciata com'era, parcheggiata cancellata),
   aggiornamento con la barra accesa anche con l'output chiuso. Non provati: l'avvio vero
   all'accesso a Windows, «Disinstalla» cliccato in Impostazioni (esegue lo stesso comando).
+- 11/11/2026, **install fuori dal pacchetto**: dopo il riavvio della sessione la barra installata
+  non girava più (morta col job della sessione di prima, da cui era stata avviata), e guardando
+  da fuori la chiave Run, la voce in Impostazioni e la config non esistevano: erano finite nel
+  registro e nella cartella privati del pacchetto Claude (vedi «Ambiente e comandi»), quindi
+  all'accesso la barra non sarebbe partita. Ora `install`/`uninstall` (`install::run`) scrivono un
+  collegamento temporaneo in `%TEMP%` a se stessi con `<comando> --result <file>`, lo fanno aprire
+  a `explorer.exe` e stampano le righe che quel processo scrive nel file (fino a `rustybar-exit:N`);
+  se Esplora risorse non lo avvia entro 10 s fanno da sé, avvisando se il processo è in un
+  pacchetto. La barra la avvia `explorer.exe <exe>` (figlia della shell, come all'accesso, con
+  l'ambiente della shell), con l'avvio diretto come ripiego. Verificato da un processo esterno:
+  chiave Run, voce in Impostazioni e config nel registro e nella cartella veri; barra figlia di
+  `explorer.exe`; le copie private tolte; la config dell'utente rimessa nel file vero. Tre account
+  `claude` (`claude_2` e `claude_3` con `dir` e `color` loro, collegati dall'utente con «Accedi»)
+  mostrano ognuno i suoi numeri nel suo colore.

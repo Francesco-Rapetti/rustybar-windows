@@ -28,13 +28,9 @@ fn main() {
             std::process::exit(config::check());
         }
         Some("quit") => process::quit_running(),
-        Some("install") => {
+        Some(command @ ("install" | "uninstall")) => {
             process::attach_console();
-            std::process::exit(install::install());
-        }
-        Some("uninstall") => {
-            process::attach_console();
-            std::process::exit(install::uninstall());
+            std::process::exit(install::run(command, &args[1..]));
         }
         Some("--version") | Some("version") => {
             process::attach_console();

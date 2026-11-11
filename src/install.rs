@@ -5,31 +5,144 @@
 //! Apps > Startup shows it, with its switch), lists it in Settings > Apps (whose Uninstall runs
 //! `rustybar uninstall`), adds a Start menu shortcut, and starts it. Uninstall undoes all of it
 //! and leaves the config and the logs.
+//!
+//! The work is always done by a second run started by File Explorer, as the bar is at sign-in: a
+//! terminal of an app package (the Claude app's is one) gets what it writes to `HKCU\Software`,
+//! and sometimes to new folders of AppData, kept private to that package, so the Run key, the
+//! Settings entry and the config would exist only for it and the bar wouldn't start at sign-in
+//! (it happened, also to a process without the package's identity, so it can't be told from the
+//! inside). Explorer opens a temporary shortcut to this executable with the command's arguments;
+//! that run writes its lines to a file, which this one prints. If Explorer doesn't start it, the
+//! work is done here.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_SUCCESS};
+use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW,
     RegDeleteTreeW, RegSetValueExW,
 };
 use windows::Win32::UI::Shell::{FOLDERID_Programs, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink};
+use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 use crate::config;
 use crate::i18n::t;
 use crate::process;
 
-/// A line for the terminal that ran the command; nothing if it went away (a closed pipe would
-/// make `println!` panic, and the bar would stay half installed).
+/// A line for the terminal that ran the command, or for the file of a run outside the package;
+/// nothing if it went away (a closed pipe would make `println!` panic, and the bar would stay half
+/// installed).
 macro_rules! say {
     ($($arg:tt)*) => {{
-        use std::io::Write;
-        let _ = writeln!(std::io::stdout(), $($arg)*);
+        line(&format!($($arg)*));
     }};
+}
+
+/// Where a run outside the package writes its lines.
+static OUT: Mutex<Option<std::fs::File>> = Mutex::new(None);
+/// The last line of that file: the exit code follows it.
+const DONE: &str = "rustybar-exit:";
+
+fn line(text: &str) {
+    use std::io::Write;
+    let mut out = OUT.lock().unwrap_or_else(|e| e.into_inner());
+    match out.as_mut() {
+        Some(file) => {
+            let _ = writeln!(file, "{text}");
+        }
+        None => {
+            let _ = writeln!(std::io::stdout(), "{text}");
+        }
+    }
+}
+
+/// `rustybar install|uninstall [--result <file>]`: has File Explorer run it again with `--result`,
+/// and that run does the work, writing its lines to `<file>`.
+pub fn run(command: &str, args: &[String]) -> i32 {
+    let result = args.iter().position(|a| a == "--result").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+    if result.is_none() {
+        if let Some(code) = relaunch(command) {
+            return code;
+        }
+        say!("{}", t("Esplora risorse non l'ha avviato: lo faccio da qui", "File Explorer didn't start it: doing it from here"));
+        if packaged() {
+            say!(
+                "{}",
+                t(
+                    "Attenzione: questo terminale è dentro il pacchetto di un'app, che può tenere per sé registro e config",
+                    "Careful: this terminal is inside an app package, which may keep the registry and the config to itself"
+                )
+            );
+        }
+    }
+    if let Some(path) = &result {
+        *OUT.lock().unwrap_or_else(|e| e.into_inner()) = std::fs::File::create(path).ok();
+    }
+    let code = if command == "install" { install() } else { uninstall() };
+    if result.is_some() {
+        say!("{DONE}{code}");
+        *OUT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    code
+}
+
+/// Whether this process runs with the identity of an app package.
+fn packaged() -> bool {
+    let mut len = 0u32;
+    unsafe { GetCurrentPackageFullName(&mut len, None) != APPMODEL_ERROR_NO_PACKAGE }
+}
+
+/// Runs the command again as a child of File Explorer: it opens a temporary shortcut to this
+/// executable with the command's arguments. Its lines come back through a file in the temporary
+/// folder (whose writes no package keeps private). None if that run never started (no Explorer,
+/// no shortcut): the caller does the work itself.
+fn relaunch(command: &str) -> Option<i32> {
+    let me = std::env::current_exe().ok()?;
+    let tag = format!("rustybar-{command}-{}", std::process::id());
+    let result = std::env::temp_dir().join(format!("{tag}.txt"));
+    let link = std::env::temp_dir().join(format!("{tag}.lnk"));
+    let arguments = format!("{command} --result \"{}\"", result.display());
+    let workdir = me.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+    if !write_link(&link, &me, &arguments, &workdir, NAME) {
+        return None;
+    }
+    let _ = Command::new(windows_dir().join("explorer.exe")).arg(&link).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    // The second run makes its file at once; then it closes the bar, copies, registers and
+    // starts it: a few seconds at most
+    let start = std::time::Instant::now();
+    let mut code = None;
+    let mut started = false;
+    let mut text = String::new();
+    while start.elapsed().as_secs() < if started { 60 } else { 10 } {
+        if let Ok(t) = std::fs::read_to_string(&result) {
+            started = true;
+            text = t;
+            if let Some(at) = text.find(DONE) {
+                code = text[at + DONE.len()..].trim().parse::<i32>().ok();
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&result);
+    if !started {
+        return None;
+    }
+    for l in text.lines().filter(|l| !l.starts_with(DONE)) {
+        say!("{l}");
+    }
+    Some(code.unwrap_or_else(|| fail(t("Il comando avviato da Esplora risorse non ha finito", "The command File Explorer started didn't finish"))))
+}
+
+fn windows_dir() -> PathBuf {
+    std::env::var_os("SystemRoot").or_else(|| std::env::var_os("windir")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"))
 }
 
 const NAME: &str = "RustyBar";
@@ -62,7 +175,7 @@ fn shortcut() -> Option<PathBuf> {
     }
 }
 
-pub fn install() -> i32 {
+fn install() -> i32 {
     let source = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => return fail(&format!("{}: {e}", t("Non trovo l'eseguibile", "Can't find the executable"))),
@@ -114,7 +227,7 @@ pub fn install() -> i32 {
     0
 }
 
-pub fn uninstall() -> i32 {
+fn uninstall() -> i32 {
     clean_parked();
     let dir = install_dir();
     let exe = installed_exe();
@@ -185,9 +298,17 @@ fn copy_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(last.unwrap_or_else(|| std::io::Error::other("copy")))
 }
 
-/// Starts the installed bar on its own, without this command's terminal, and with its own config
-/// dir whatever the caller's environment says.
+/// Starts the installed bar on its own, as it starts at sign-in: through File Explorer
+/// (`explorer.exe <exe>` hands the file to the running shell, which starts it), so the bar is a
+/// child of the shell, outside every job of the terminal that ran the command (a terminal of an
+/// app may end its whole tree, the bar with it), and with the shell's environment, not the
+/// terminal's. If the shell doesn't start it, the bar is started directly.
 fn start(exe: &Path) -> std::io::Result<()> {
+    let windir = windows_dir();
+    let shell = Command::new(windir.join("explorer.exe")).arg(exe).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    if shell.is_ok() && running(5000) {
+        return Ok(());
+    }
     let spawn = |flags: u32| {
         Command::new(exe)
             .current_dir(install_dir())
@@ -203,6 +324,21 @@ fn start(exe: &Path) -> std::io::Result<()> {
     // Out of the terminal's job, if it has one that would end its children with it; a job that
     // doesn't allow it refuses the flag, and the bar starts inside it
     spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB).or_else(|_| spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP))
+}
+
+/// Whether the bar of the default config dir runs, waiting up to `wait_ms` for its window.
+fn running(wait_ms: u64) -> bool {
+    let title = HSTRING::from(config::default_dir().to_string_lossy().as_ref());
+    let start = std::time::Instant::now();
+    loop {
+        if unsafe { FindWindowW(process::CONTROL_CLASS, &title) }.is_ok() {
+            return true;
+        }
+        if start.elapsed().as_millis() >= wait_ms as u128 {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn wide(s: &str) -> Vec<u8> {
@@ -259,17 +395,26 @@ fn register_app(dir: &Path, exe: &Path) -> bool {
 /// A Start menu shortcut to the installed bar.
 fn make_shortcut(exe: &Path) -> Option<PathBuf> {
     let link = shortcut()?;
+    let description = t("Barra di stato leggera per Windows", "A light status bar for Windows");
+    write_link(&link, exe, "", &install_dir(), description).then_some(link)
+}
+
+/// A shortcut at `link` to `target` with `arguments`.
+fn write_link(link: &Path, target: &Path, arguments: &str, workdir: &Path, description: &str) -> bool {
     unsafe {
         // S_FALSE when COM was already there: fine either way
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let shell: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
-        shell.SetPath(&HSTRING::from(exe.as_os_str())).ok()?;
-        shell.SetWorkingDirectory(&HSTRING::from(install_dir().as_os_str())).ok()?;
-        shell.SetDescription(&HSTRING::from(t("Barra di stato leggera per Windows", "A light status bar for Windows"))).ok()?;
-        let file: IPersistFile = shell.cast().ok()?;
-        file.Save(&HSTRING::from(link.as_os_str()), true).ok()?;
+        let save = || -> windows::core::Result<()> {
+            let shell: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            shell.SetPath(&HSTRING::from(target.as_os_str()))?;
+            shell.SetArguments(&HSTRING::from(arguments))?;
+            shell.SetWorkingDirectory(&HSTRING::from(workdir.as_os_str()))?;
+            shell.SetDescription(&HSTRING::from(description))?;
+            let file: IPersistFile = shell.cast()?;
+            file.Save(&HSTRING::from(link.as_os_str()), true)
+        };
+        save().is_ok()
     }
-    Some(link)
 }
 
 #[cfg(test)]
