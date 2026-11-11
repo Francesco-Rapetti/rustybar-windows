@@ -95,8 +95,8 @@ impl Default for Layout {
     fn default() -> Self {
         Layout {
             left: vec!["workspaces".into(), "front_app".into()],
-            center: vec![],
-            right: vec!["clock".into()],
+            center: vec!["media".into()],
+            right: vec!["network".into(), "audio".into(), "system".into(), "clock".into()],
         }
     }
 }
@@ -180,7 +180,6 @@ impl Options {
         self.0.get(key).and_then(|v| v.as_str())
     }
 
-    #[allow(dead_code)]
     pub fn f64(&self, key: &str) -> Option<f64> {
         self.0.get(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
     }

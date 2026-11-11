@@ -12,7 +12,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, D3D11_CREATE_DEVICE_SINGLETHREADED,
+    D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionAnimation, IDCompositionDesktopDevice, IDCompositionSurface,
@@ -37,12 +38,18 @@ pub struct Gfx {
 
 fn d3d(hardware: bool) -> Result<ID3D11Device> {
     let mut device = None;
+    let mut flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED;
+    if !hardware {
+        // WARP rasterizes on the calling thread instead of a pool of its own: for surfaces this
+        // small the pool only adds threads to wake up at every redraw
+        flags |= D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
+    }
     unsafe {
         D3D11CreateDevice(
             None,
             if hardware { D3D_DRIVER_TYPE_HARDWARE } else { D3D_DRIVER_TYPE_WARP },
             HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
+            flags,
             None,
             D3D11_SDK_VERSION,
             Some(&mut device),

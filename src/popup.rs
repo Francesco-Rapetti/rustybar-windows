@@ -9,24 +9,31 @@ use std::cell::Cell;
 use std::sync::Once;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct2D::{D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, ID2D1DeviceContext,
+};
 use windows::Win32::Graphics::DirectComposition::{IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2, IDCompositionVisual3};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, RegisterClassExW, SW_SHOW,
-    SWP_NOACTIVATE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_TIMER, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOACTIVATE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_TIMER, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Interface, PCWSTR, Result, w};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::app::{Event, push};
 use crate::gfx::{self, Gfx};
 use crate::log;
 use crate::theme::{Rgba, Theme};
-use crate::ui::{Align, Fonts, Rect, Scene, Shape};
+use crate::ui::{Align, Fonts, Image, Rect, Scene, Shape, Zone};
 
 const CLASS: PCWSTR = w!("RustyBarPopup");
 /// Not in the parts of the `windows` crate the bar uses (it's in `Win32_UI_Controls`).
@@ -64,6 +71,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDOWN => {
             push(Event::PopupMouse { hwnd, at: Some(point(lparam)), click: true });
+            return LRESULT(0);
+        }
+        // The end of a drag on a slider: the mouse went up, or something took it away
+        WM_LBUTTONUP | WM_CAPTURECHANGED => {
+            push(Event::PopupRelease(hwnd));
             return LRESULT(0);
         }
         WM_MOUSELEAVE => {
@@ -181,6 +193,8 @@ pub struct Popup {
     mouse: Option<(f32, f32)>,
     hover: Option<(Rect, f32)>,
     wheel: i32,
+    /// The slider being dragged, from the press until the mouse goes up.
+    drag: Option<Zone>,
 }
 
 impl Popup {
@@ -218,6 +232,7 @@ impl Popup {
             mouse: None,
             hover: None,
             wheel: 0,
+            drag: None,
         })
     }
 
@@ -313,10 +328,36 @@ impl Popup {
         self.update_hover(gfx, theme)
     }
 
-    /// The action of the zone at `at` (client pixels).
-    pub fn action_at(&self, at: (i32, i32)) -> Option<String> {
+    /// A press at `at` (client pixels): the action of the zone there, and for a slider where
+    /// along it (the drag starts, and the popup keeps the mouse until it goes up).
+    pub fn press(&mut self, at: (i32, i32)) -> Option<(String, Option<f32>)> {
         let (x, y) = (at.0 as f32 / self.scale, at.1 as f32 / self.scale);
-        self.scene.zone_at(x, y).map(|i| self.scene.zones[i].action.clone())
+        let zone = self.scene.zones[self.scene.zone_at(x, y)?].clone();
+        if !zone.slider {
+            return Some((zone.action, None));
+        }
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        let fraction = zone.fraction(x);
+        let action = zone.action.clone();
+        self.drag = Some(zone);
+        Some((action, Some(fraction)))
+    }
+
+    /// The mouse at `at` during a drag: the slider's action and where along it.
+    pub fn drag_to(&self, at: (i32, i32)) -> Option<(String, f32)> {
+        let zone = self.drag.as_ref()?;
+        Some((zone.action.clone(), zone.fraction(at.0 as f32 / self.scale)))
+    }
+
+    /// The end of a drag: the slider's action, if one was dragged.
+    pub fn release(&mut self) -> Option<String> {
+        let zone = self.drag.take()?;
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        Some(zone.action)
     }
 
     /// Adds a wheel delta and returns the whole notches it makes: a touchpad sends small ones.
@@ -329,7 +370,12 @@ impl Popup {
 
     /// Puts the hover tint under the mouse's zone, or takes it away. True if anything changed.
     fn update_hover(&mut self, gfx: &Gfx, theme: &Theme) -> Result<bool> {
-        let hover = self.mouse.and_then(|(x, y)| self.scene.zone_at(x, y)).map(|i| (self.scene.zones[i].rect, self.scene.zones[i].radius));
+        let hover = self
+            .mouse
+            .and_then(|(x, y)| self.scene.zone_at(x, y))
+            .map(|i| &self.scene.zones[i])
+            .filter(|z| !z.slider && self.drag.is_none())
+            .map(|z| (z.rect, z.radius));
         if hover == self.hover {
             return Ok(false);
         }
@@ -415,9 +461,45 @@ fn draw(surface: &IDCompositionSurface, s: f32, theme: &Theme, scene: &Scene, fo
                     let at = Vector2 { X: (x * s).round() / s, Y: (y * s).round() / s };
                     ctx.DrawTextLayout(at, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 }
+                Shape::Image { rect, radius, image } => {
+                    if let Err(e) = draw_image(ctx, *rect, *radius, image) {
+                        log!("popup image: {e}");
+                    }
+                }
             }
         }
     })
+}
+
+/// A picture stretched over `rect` with rounded corners: a bitmap brush filling the shape.
+fn draw_image(ctx: &ID2D1DeviceContext, rect: Rect, radius: f32, image: &Image) -> Result<()> {
+    if image.width == 0 || image.height == 0 || image.pixels.len() < (image.width * image.height * 4) as usize {
+        return Ok(());
+    }
+    unsafe {
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U { width: image.width, height: image.height };
+        let bitmap = ctx.CreateBitmap(size, Some(image.pixels.as_ptr() as *const _), image.width * 4, &properties)?;
+        let brush_properties = D2D1_BITMAP_BRUSH_PROPERTIES1 {
+            extendModeX: D2D1_EXTEND_MODE_CLAMP,
+            extendModeY: D2D1_EXTEND_MODE_CLAMP,
+            // Linear: the cubic modes make Direct2D compile a shader (d3dcompiler_47.dll, 4.6 MB)
+            interpolationMode: D2D1_INTERPOLATION_MODE_LINEAR,
+        };
+        let brush = ctx.CreateBitmapBrush(&bitmap, Some(&brush_properties), None)?;
+        // At 96 DPI the bitmap is as many DIPs as pixels: stretched to the rectangle, moved onto it
+        let scale = Matrix3x2::scale(rect.w / image.width as f32, rect.h / image.height as f32);
+        brush.SetTransform(&(scale * Matrix3x2::translation(rect.x, rect.y)));
+        let shape = D2D1_ROUNDED_RECT { rect: gfx::rect(rect.x, rect.y, rect.w, rect.h), radiusX: radius, radiusY: radius };
+        ctx.FillRoundedRectangle(&shape, &brush);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

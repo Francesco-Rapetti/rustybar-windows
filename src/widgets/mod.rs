@@ -10,12 +10,17 @@ use crate::config::Options;
 use crate::theme::Theme;
 use crate::ui::{Fonts, Pill, Scene};
 
+pub mod audio;
+pub mod claude;
 pub mod clock;
 pub mod front_app;
+pub mod media;
+pub mod network;
+pub mod system;
 pub mod workspaces;
 
 /// The kinds `create` knows.
-pub const KINDS: &[&str] = &["clock", "front_app", "workspaces"];
+pub const KINDS: &[&str] = &["audio", "claude", "clock", "front_app", "media", "network", "system", "workspaces"];
 
 /// What happened, for every widget.
 pub enum Signal<'a> {
@@ -27,6 +32,8 @@ pub enum Signal<'a> {
     TimeChanged,
     /// Whether some bar shows: none while a game is full screen on every screen.
     Shown(bool),
+    /// Whether a game of `[games] apps` is in front: timers stop but the clock's.
+    Game(bool),
 }
 
 pub trait Widget {
@@ -38,9 +45,21 @@ pub trait Widget {
         None
     }
 
-    /// The handle was signaled. True if the pill changed.
+    /// The handles for the app to wait on, for a widget with more than one (an event its
+    /// callbacks set, a timer).
+    fn handles(&self) -> Vec<HANDLE> {
+        self.handle().into_iter().collect()
+    }
+
+    /// The handle was signaled. True if what the widget shows changed: its pill, or its popup
+    /// while it's open.
     fn signaled(&mut self) -> bool {
         false
+    }
+
+    /// The handle at `index` of `handles` was signaled; as `signaled`.
+    fn signaled_at(&mut self, _index: usize) -> bool {
+        self.signaled()
     }
 
     /// True if the pill changed.
@@ -50,6 +69,12 @@ pub trait Widget {
 
     /// Whether a click on the pill opens a popup.
     fn has_popup(&self) -> bool {
+        false
+    }
+
+    /// A click on the pill of a widget without a popup, on its item `item` (by its index in the
+    /// pill) or between items. True if the pill changed.
+    fn click(&mut self, _item: Option<usize>) -> bool {
         false
     }
 
@@ -72,6 +97,10 @@ pub trait Widget {
 pub enum Input<'a> {
     /// A click on a zone, by its action.
     Action(&'a str),
+    /// A press on a slider, or a drag after it: its action and where along it, 0 to 1.
+    Slide(&'a str, f32),
+    /// The mouse went up after a press on a slider.
+    Release(&'a str),
     /// Wheel notches: positive away from the user (up), negative toward.
     Wheel(i32),
     /// A key, as Windows' virtual-key code (Esc closes the popup before it gets here).
@@ -95,7 +124,12 @@ pub enum Reply {
 pub fn create(kind: &str, options: &Options) -> Option<Box<dyn Widget>> {
     match kind {
         "clock" => Some(Box::new(clock::Clock::new(options))),
+        "audio" => Some(Box::new(audio::Audio::new())),
+        "claude" => Some(Box::new(claude::Claude::new(options))),
+        "media" => Some(Box::new(media::Media::new(options))),
+        "network" => Some(Box::new(network::Network::new())),
         "front_app" => Some(Box::new(front_app::FrontApp::default())),
+        "system" => Some(Box::new(system::System::new(options))),
         "workspaces" => Some(Box::new(workspaces::Workspaces::new(options))),
         _ => None,
     }

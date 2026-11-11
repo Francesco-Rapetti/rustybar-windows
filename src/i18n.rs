@@ -1,8 +1,10 @@
-//! Texts in Italian or English, as the language of Windows is.
+//! Texts in Italian or English, as the language of Windows is, and numbers as the region writes
+//! them.
 
 use std::sync::OnceLock;
 
-use windows::Win32::Globalization::GetUserDefaultUILanguage;
+use windows::Win32::Globalization::{GetLocaleInfoEx, GetUserDefaultUILanguage, LOCALE_SDECIMAL};
+use windows::core::PCWSTR;
 
 /// Whether Windows speaks Italian (any region).
 pub fn italian() -> bool {
@@ -14,4 +16,49 @@ pub fn italian() -> bool {
 /// `t("italiano", "english")`
 pub fn t<'a>(it: &'a str, en: &'a str) -> &'a str {
     if italian() { it } else { en }
+}
+
+/// The region's decimal separator (`,` in Italy).
+fn separator() -> &'static str {
+    static SEPARATOR: OnceLock<String> = OnceLock::new();
+    SEPARATOR.get_or_init(|| {
+        let mut buf = [0u16; 8];
+        let n = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_SDECIMAL, Some(&mut buf)) };
+        if n > 1 { String::from_utf16_lossy(&buf[..n as usize - 1]) } else { ".".into() }
+    })
+}
+
+/// `v` with `digits` decimals, as the region writes it: `13,8`.
+pub fn number(v: f64, digits: usize) -> String {
+    let s = format!("{v:.digits$}");
+    if digits == 0 { s } else { s.replace('.', separator()) }
+}
+
+/// Bytes as File Explorer counts them (by 1024): `820 MB`, `13,8 GB`, `380 GB`, `1,8 TB`.
+pub fn size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["MB", "GB", "TB", "PB"];
+    let mut v = bytes as f64 / (1024.0 * 1024.0);
+    let mut unit = 0;
+    while v >= 1000.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    // A decimal only where it says something: under 100 of a unit, and never for MB
+    let digits = if unit > 0 && v < 99.95 { 1 } else { 0 };
+    format!("{} {}", number(v, digits), UNITS[unit])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes() {
+        let sep = separator();
+        assert_eq!(size(820 * 1024 * 1024), "820 MB");
+        assert_eq!(size(14_817_637_171), format!("13{sep}8 GB"));
+        assert_eq!(size(380 * 1024 * 1024 * 1024), "380 GB");
+        assert_eq!(size(2_000_000_000_000), format!("1{sep}8 TB"));
+        assert_eq!(number(3.0, 0), "3");
+    }
 }

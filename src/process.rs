@@ -31,6 +31,14 @@ pub fn setup() {
         if let Err(e) = SetPriorityClass(process, BELOW_NORMAL_PRIORITY_CLASS) {
             log!("priority: {e}");
         }
+    }
+    make_small(unsafe { GetCurrentProcess() });
+}
+
+/// EcoQoS (on a hybrid CPU the scheduler keeps the process on the efficient cores, and it runs at
+/// a lower clock) and low memory priority, for this process or a child of it.
+pub fn make_small(process: HANDLE) {
+    unsafe {
         let throttling = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
             ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,

@@ -70,7 +70,7 @@ fn window_pid(hwnd: HWND) -> Option<u32> {
     (pid != 0).then_some(pid)
 }
 
-fn process_path(pid: u32) -> Option<String> {
+pub fn process_path(pid: u32) -> Option<String> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
@@ -110,7 +110,7 @@ fn file_name(path: &str) -> &str {
 
 /// The app's name from its version information: the description, else the product name, else
 /// the file name without `.exe`.
-fn describe(path: &str) -> String {
+pub fn describe(path: &str) -> String {
     version_string(path, "FileDescription")
         .or_else(|| version_string(path, "ProductName"))
         .unwrap_or_else(|| {

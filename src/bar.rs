@@ -71,6 +71,8 @@ struct PillVisual {
     text_sig: u64,
     x: f32,
     highlight: Option<Highlight>,
+    /// Where each item is in the pill, in pixels: its left edge and its width, for a click.
+    items: Vec<(f32, f32)>,
 }
 
 pub struct Bar {
@@ -353,11 +355,24 @@ impl Bar {
                     comp.root.AddVisual(&visual, true, None)?;
                     self.pills.insert(
                         m.key.clone(),
-                        PillVisual { visual, background, text_visual, text, size, background_sig: 0, text_sig: 0, x: left, highlight: None },
+                        PillVisual {
+                            visual,
+                            background,
+                            text_visual,
+                            text,
+                            size,
+                            background_sig: 0,
+                            text_sig: 0,
+                            x: left,
+                            highlight: None,
+                            items: Vec::new(),
+                        },
                     );
                 }
             }
             let pv = self.pills.get_mut(&m.key).expect("just inserted");
+            // Each item, half the gap on either side, so a click between two goes to the nearer
+            pv.items = m.items.iter().map(|p| (((p.x - m.pill.gap / 2.0) * s).round(), ((p.width + m.pill.gap) * s).round())).collect();
             if pv.size != size {
                 pv.background = gfx.surface(size.0, size.1)?;
                 pv.text = gfx.surface(size.0, size.1)?;
@@ -401,11 +416,14 @@ impl Bar {
         Ok(())
     }
 
-    /// The pill under `x` (client pixels), by its widget's name. The bar's whole height counts,
-    /// up to the screen's edge, where the mouse stops by itself.
-    pub fn pill_at(&self, x: i32) -> Option<String> {
+    /// The pill under `x` (client pixels), by its widget's name, and the item of it under `x` if
+    /// any. The bar's whole height counts, up to the screen's edge, where the mouse stops by itself.
+    pub fn hit(&self, x: i32) -> Option<(String, Option<usize>)> {
         let x = x as f32;
-        self.pills.iter().find(|(_, pv)| x >= pv.x && x < pv.x + pv.size.0 as f32).map(|(key, _)| key.clone())
+        let (key, pv) = self.pills.iter().find(|(_, pv)| x >= pv.x && x < pv.x + pv.size.0 as f32)?;
+        let inside = x - pv.x;
+        let item = pv.items.iter().position(|(left, width)| inside >= *left && inside < left + width);
+        Some((key.clone(), item))
     }
 
     /// A pill's left and right edges, and the bar's bottom, in screen pixels.
@@ -456,7 +474,7 @@ fn draw_text(surface: &IDCompositionSurface, s: f32, theme: &Theme, m: &Measured
     gfx::draw(surface, s, |ctx, brush| unsafe {
         for (item, placed) in m.pill.items.iter().zip(&m.items) {
             brush.SetColor(&gfx::color(item.color));
-            let x = placed.x + (placed.width - placed.text_width) / 2.0;
+            let x = placed.x + placed.text_x;
             // Snapped to whole pixels: text between pixels looks blurred
             let y = ((height - placed.text_height) / 2.0 * s).round() / s;
             ctx.DrawTextLayout(Vector2 { X: (x * s).round() / s, Y: y }, &placed.layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);

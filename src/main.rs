@@ -9,11 +9,14 @@ mod bar;
 mod config;
 mod gfx;
 mod i18n;
+mod json;
 mod log;
 mod popup;
 mod process;
+mod stats;
 mod theme;
 mod ui;
+mod wake;
 mod widgets;
 
 fn main() {

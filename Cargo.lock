@@ -27,6 +27,7 @@ dependencies = [
  "serde",
  "toml",
  "windows",
+ "windows-core",
  "windows-numerics",
 ]
 

@@ -26,6 +26,11 @@ impl Rgba {
         Rgba(m(self.0, other.0), m(self.1, other.1), m(self.2, other.2), m(self.3, other.3))
     }
 
+    /// This color, as opaque as `a`.
+    pub fn alpha(self, a: f32) -> Rgba {
+        Rgba(self.0, self.1, self.2, a)
+    }
+
     /// For telling two colors apart in a signature, without floats.
     pub fn bits(self) -> u32 {
         let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
@@ -458,9 +463,25 @@ impl Theme {
     }
 
     /// A palette name or a hex color.
-    #[allow(dead_code)]
     pub fn color(&self, s: &str) -> Option<Rgba> {
         resolve(&self.palette, s)
+    }
+
+    /// `normal` below `warning`, yellow from it, red from `critical`.
+    pub fn level(&self, value: f64, warning: f64, critical: f64, normal: Rgba) -> Rgba {
+        if value >= critical {
+            self.color("red").unwrap_or(normal)
+        } else if value >= warning {
+            self.color("yellow").unwrap_or(normal)
+        } else {
+            normal
+        }
+    }
+
+    /// The background of a tile in a popup: the text color, faintly; tinted with `color` when it
+    /// warns.
+    pub fn tile(&self, color: Rgba, alert: bool) -> Rgba {
+        if alert { color.alpha(0.16) } else { self.text.alpha(0.05) }
     }
 }
 

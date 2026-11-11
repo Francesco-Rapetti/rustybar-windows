@@ -7,6 +7,7 @@
 //! pill again.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Instant, SystemTime};
@@ -17,6 +18,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindCloseChangeNotification, FindFirstChangeNotificationW,
     FindNextChangeNotification,
 };
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
@@ -55,6 +57,8 @@ pub enum Event {
     PopupInactive(HWND),
     /// The mouse over the popup, in client pixels (None: it left), and whether it clicked.
     PopupMouse { hwnd: HWND, at: Option<(i32, i32)>, click: bool },
+    /// The mouse went up over the popup (the end of a drag).
+    PopupRelease(HWND),
     PopupWheel { hwnd: HWND, delta: i32 },
     PopupKey { hwnd: HWND, key: u16 },
     /// A closed popup finished fading out.
@@ -94,6 +98,8 @@ pub struct App {
     theme: Theme,
     text: Text,
     widgets: Vec<Slot>,
+    /// The pills as last measured, by widget name.
+    measured: HashMap<String, Measured>,
     // The popups and the bars go before the devices they draw with
     /// The open popup, if any.
     popup: Option<Popup>,
@@ -126,14 +132,16 @@ pub fn run() {
         log!("a bar already runs for this config dir");
         return;
     };
-    let mut app = match App::new(started) {
-        Ok(app) => app,
-        Err(e) => {
-            log!("can't start: {e}");
-            return;
-        }
-    };
-    app.run_loop();
+    // COM for the widgets that need it (Core Audio, the media sessions): a single-threaded
+    // apartment, the loop pumps its messages
+    if let Err(e) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
+        log!("COM: {e}");
+    }
+    match App::new(started) {
+        Ok(mut app) => app.run_loop(),
+        Err(e) => log!("can't start: {e}"),
+    }
+    unsafe { CoUninitialize() };
     log!("quitting");
 }
 
@@ -159,6 +167,7 @@ impl App {
         };
         let mut app = App {
             widgets: make_widgets(&config),
+            measured: HashMap::new(),
             config,
             theme,
             text,
@@ -193,15 +202,16 @@ impl App {
         loop {
             self.frame();
             let mut handles: Vec<HANDLE> = Vec::new();
-            let mut owners: Vec<Option<usize>> = Vec::new();
+            // Each handle's owner: a widget and which of its handles, or the config dir
+            let mut owners: Vec<Option<(usize, usize)>> = Vec::new();
             if let Some(h) = self.config_watch {
                 handles.push(h);
                 owners.push(None);
             }
             for (i, slot) in self.widgets.iter().enumerate() {
-                if let Some(h) = slot.widget.handle() {
+                for (j, h) in slot.widget.handles().into_iter().enumerate() {
                     handles.push(h);
-                    owners.push(Some(i));
+                    owners.push(Some((i, j)));
                 }
             }
             let r = unsafe { MsgWaitForMultipleObjectsEx(Some(&handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
@@ -209,8 +219,8 @@ impl App {
             if index < handles.len() {
                 match owners[index] {
                     None => self.config_changed(),
-                    Some(i) => {
-                        if self.widgets[i].widget.signaled() {
+                    Some((i, j)) => {
+                        if self.widgets[i].widget.signaled_at(j) {
                             self.changed(i);
                         }
                     }
@@ -241,6 +251,11 @@ impl App {
                 }
             }
             Event::PopupMouse { hwnd, at, click } => self.popup_mouse(hwnd, at, click),
+            Event::PopupRelease(hwnd) => {
+                if let Some(action) = self.popup.as_mut().filter(|p| p.hwnd == hwnd).and_then(|p| p.release()) {
+                    self.popup_input(&Input::Release(&action));
+                }
+            }
             Event::PopupWheel { hwnd, delta } => {
                 if let Some(popup) = self.popup.as_mut().filter(|p| p.hwnd == hwnd) {
                     let notches = popup.wheel(delta);
@@ -332,12 +347,13 @@ impl App {
             && front != self.front
         {
             let game = self.config.games.apps.iter().any(|a| a.eq_ignore_ascii_case(&front.exe));
-            if game != self.game_in_front {
-                log!("{} {}", front.exe, if game { "is a listed game: no animations" } else { "is in front" });
-                self.game_in_front = game;
-            }
             self.front = front.clone();
             self.broadcast(&Signal::Foreground(&front));
+            if game != self.game_in_front {
+                log!("{} {}", front.exe, if game { "is a listed game: no animations, timers stopped" } else { "is in front" });
+                self.game_in_front = game;
+                self.broadcast(&Signal::Game(game));
+            }
         }
         self.update_visibility();
     }
@@ -415,18 +431,29 @@ impl App {
         self.dirty = true;
     }
 
-    fn measure(&self) -> Sides {
-        let group = |names: &[String]| -> Vec<Measured> {
+    /// Every pill measured: a pill that's the same as last time keeps its layout, so a number that
+    /// changes in one widget lays out that widget's text alone.
+    fn measure(&mut self) -> Sides {
+        let mut cache = std::mem::take(&mut self.measured);
+        let mut group = |names: &[String]| -> Vec<Measured> {
             names
                 .iter()
                 .filter_map(|name| {
                     let slot = self.widgets.iter().find(|s| &s.name == name)?;
                     let pill = slot.widget.pill(&self.theme)?;
-                    self.text.measure(name, pill, &self.theme).map_err(|e| log!("{name}: {e}")).ok()
+                    if let Some(m) = cache.get(name).filter(|m| m.pill == pill) {
+                        return Some(m.clone());
+                    }
+                    let m = self.text.measure(name, pill, &self.theme).map_err(|e| log!("{name}: {e}")).ok()?;
+                    cache.insert(name.clone(), m.clone());
+                    Some(m)
                 })
                 .collect()
         };
-        Sides { left: group(&self.config.layout.left), center: group(&self.config.layout.center), right: group(&self.config.layout.right) }
+        let layout = &self.config.layout;
+        let sides = Sides { left: group(&layout.left), center: group(&layout.center), right: group(&layout.right) };
+        self.measured = cache;
+        sides
     }
 
     /// Brings every bar, and the open popup, up to date if something changed.
@@ -494,6 +521,8 @@ impl App {
             Ok(text) => self.text = text,
             Err(e) => log!("fonts: {e}"),
         }
+        // Laid out with the old fonts
+        self.measured.clear();
         self.dirty = true;
         self.popup_dirty = true;
     }
@@ -504,14 +533,24 @@ impl App {
     /// else it closes the open popup.
     fn click(&mut self, hwnd: HWND, x: i32) {
         let Some(index) = self.bars.iter().position(|b| b.hwnd == hwnd) else { return };
-        let hit = self.bars[index].pill_at(x);
-        if self.popup.as_ref().is_some_and(|p| p.bar == hwnd && Some(&p.widget) == hit.as_ref()) {
+        let hit = self.bars[index].hit(x);
+        if self.popup.as_ref().is_some_and(|p| p.bar == hwnd && Some(&p.widget) == hit.as_ref().map(|(name, _)| name)) {
             self.close_popup(true);
             return;
         }
-        match hit {
-            Some(name) if self.widgets.iter().any(|s| s.name == name && s.widget.has_popup()) => self.open_popup(&name, index),
-            _ => self.close_popup(true),
+        let Some((name, item)) = hit else {
+            self.close_popup(true);
+            return;
+        };
+        let Some(i) = self.widgets.iter().position(|s| s.name == name) else { return };
+        if self.widgets[i].widget.has_popup() {
+            self.open_popup(&name, index);
+        } else {
+            // A pill that does something by itself (the desktops' switches the desktop)
+            self.close_popup(true);
+            if self.widgets[i].widget.click(item) {
+                self.changed(i);
+            }
         }
     }
 
@@ -648,9 +687,15 @@ impl App {
     fn popup_mouse(&mut self, hwnd: HWND, at: Option<(i32, i32)>, click: bool) {
         let Some(popup) = self.popup.as_mut().filter(|p| p.hwnd == hwnd) else { return };
         if click {
-            if let Some(action) = at.and_then(|at| popup.action_at(at)) {
-                self.popup_input(&Input::Action(&action));
+            match at.and_then(|at| popup.press(at)) {
+                Some((action, None)) => self.popup_input(&Input::Action(&action)),
+                Some((action, Some(fraction))) => self.popup_input(&Input::Slide(&action, fraction)),
+                None => {}
             }
+            return;
+        }
+        if let Some((action, fraction)) = at.and_then(|at| popup.drag_to(at)) {
+            self.popup_input(&Input::Slide(&action, fraction));
             return;
         }
         let Some(gfx) = &self.gfx else { return };
@@ -707,6 +752,14 @@ impl App {
         self.reload_theme();
         let front = self.front.clone();
         self.broadcast(&Signal::Foreground(&front));
+        // The new widgets start as if a bar showed and no game was in front
+        self.game_in_front = self.config.games.apps.iter().any(|a| a.eq_ignore_ascii_case(&front.exe));
+        if self.game_in_front {
+            self.broadcast(&Signal::Game(true));
+        }
+        if !self.bars.iter().any(|b| b.visible) {
+            self.broadcast(&Signal::Shown(false));
+        }
         if bars_changed {
             self.build_bars();
         } else {

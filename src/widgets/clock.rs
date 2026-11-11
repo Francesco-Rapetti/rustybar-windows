@@ -184,7 +184,8 @@ impl super::Widget for Clock {
                 self.stop();
                 false
             }
-            super::Signal::Foreground(_) => false,
+            // The bar still shows with a game in front: the clock goes on
+            super::Signal::Foreground(_) | super::Signal::Game(_) => false,
         }
     }
 
@@ -276,6 +277,7 @@ impl super::Widget for Clock {
                 k if k == VK_HOME.0 => this_month() - cal.month,
                 _ => 0,
             },
+            Input::Slide(..) | Input::Release(_) => 0,
         };
         // Windows' dates go from 1601 to 30827; the calendar stays well inside them
         let month = (cal.month + step).clamp(1601 * 12, 9999 * 12 + 11);
@@ -357,14 +359,14 @@ fn day_url(template: &str, year: i32, month: u32, day: u32) -> String {
     template.replace("{year}", &year.to_string()).replace("{month}", &month.to_string()).replace("{day}", &day.to_string())
 }
 
-fn format_date(t: &SYSTEMTIME, picture: &HSTRING) -> String {
+pub fn format_date(t: &SYSTEMTIME, picture: &HSTRING) -> String {
     let mut buf = [0u16; 80];
     let n = unsafe { GetDateFormatEx(PCWSTR::null(), ENUM_DATE_FORMATS_FLAGS(0), Some(t), picture, Some(&mut buf), PCWSTR::null()) };
     // The count includes the terminating null
     String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]).replace('.', "")
 }
 
-fn format_time(t: &SYSTEMTIME) -> String {
+pub fn format_time(t: &SYSTEMTIME) -> String {
     let mut buf = [0u16; 40];
     let n = unsafe { GetTimeFormatEx(PCWSTR::null(), TIME_NOSECONDS, Some(t), PCWSTR::null(), Some(&mut buf)) };
     String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize])

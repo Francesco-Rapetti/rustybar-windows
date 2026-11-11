@@ -11,6 +11,10 @@ use windows::Win32::System::Registry::{
     RRF_RT_REG_SZ, RegCloseKey, RegGetValueW, RegNotifyChangeKeyValue, RegOpenKeyExW,
 };
 use windows::Win32::System::Threading::CreateEventW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_LCONTROL,
+    VK_LEFT, VK_LWIN, VK_RIGHT,
+};
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::config::Options;
@@ -27,6 +31,8 @@ pub struct Workspaces {
     /// Each desktop's label: its name, or its number.
     desktops: Vec<String>,
     current: Option<usize>,
+    /// A listed game is in front: clicks send no keys.
+    game: bool,
 }
 
 impl Workspaces {
@@ -38,7 +44,7 @@ impl Workspaces {
             log!("workspaces: no VirtualDesktops key ({opened:?})");
         }
         let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }.unwrap_or_default();
-        let mut w = Workspaces { key, event, single: options.bool("single").unwrap_or(false), desktops: Vec::new(), current: None };
+        let mut w = Workspaces { key, event, single: options.bool("single").unwrap_or(false), desktops: Vec::new(), current: None, game: false };
         w.read();
         w.watch();
         w
@@ -110,11 +116,56 @@ impl super::Widget for Workspaces {
         self.key.map(|_| self.event)
     }
 
+    /// A click on a desktop goes there, with Windows' own shortcut: Ctrl+Win+← or → as many
+    /// times as there are desktops in between, sent in one go so the user's typing can't get in
+    /// the middle. Nothing while a listed game is in front: the keys are simulated, and an
+    /// anti-cheat may watch them. The registry says when the desktop changed, and the highlight
+    /// slides there.
+    fn click(&mut self, item: Option<usize>) -> bool {
+        let (Some(target), Some(current)) = (item, self.current) else { return false };
+        if target == current || target >= self.desktops.len() || self.game {
+            return false;
+        }
+        let keys = switch_keys(current, target);
+        let sent = unsafe { SendInput(&keys, size_of::<INPUT>() as i32) };
+        if sent as usize != keys.len() {
+            log!("workspaces: Windows took {sent} of {} keys", keys.len());
+        }
+        false
+    }
+
+    fn event(&mut self, signal: &super::Signal) -> bool {
+        if let super::Signal::Game(game) = signal {
+            self.game = *game;
+        }
+        false
+    }
+
     fn signaled(&mut self) -> bool {
         let changed = self.read();
         self.watch();
         changed
     }
+}
+
+/// Ctrl and Win down, ← or → pressed once per desktop between `from` and `to`, Win and Ctrl up.
+fn switch_keys(from: usize, to: usize) -> Vec<INPUT> {
+    let key = |vk: VIRTUAL_KEY, up: bool, extended: bool| {
+        let mut flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+        if extended {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    };
+    let arrow = if to > from { VK_RIGHT } else { VK_LEFT };
+    let mut keys = vec![key(VK_LCONTROL, false, false), key(VK_LWIN, false, true)];
+    for _ in 0..from.abs_diff(to) {
+        keys.push(key(arrow, false, true));
+        keys.push(key(arrow, true, true));
+    }
+    keys.push(key(VK_LWIN, true, true));
+    keys.push(key(VK_LCONTROL, true, false));
+    keys
 }
 
 fn binary(key: HKEY, sub: Option<&HSTRING>, value: PCWSTR) -> Option<Vec<u8>> {
@@ -163,5 +214,17 @@ mod tests {
     fn guid_as_in_the_registry() {
         let bytes = [0x77, 0x4F, 0xAC, 0x07, 0xC2, 0xAA, 0x87, 0x42, 0xB9, 0xAA, 0x2A, 0x2F, 0x70, 0x86, 0xCC, 0x6A];
         assert_eq!(super::guid(&bytes), "{07AC4F77-AAC2-4287-B9AA-2A2F7086CC6A}");
+    }
+
+    #[test]
+    fn keys_to_switch_desktops() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_LCONTROL, VK_LEFT, VK_LWIN, VK_RIGHT};
+        let keys = super::switch_keys(0, 2);
+        let vk: Vec<u16> = keys.iter().map(|k| unsafe { k.Anonymous.ki.wVk.0 }).collect();
+        assert_eq!(vk, [VK_LCONTROL.0, VK_LWIN.0, VK_RIGHT.0, VK_RIGHT.0, VK_RIGHT.0, VK_RIGHT.0, VK_LWIN.0, VK_LCONTROL.0]);
+        // Every key that goes down comes up
+        let ups = keys.iter().filter(|k| unsafe { k.Anonymous.ki.dwFlags.contains(KEYEVENTF_KEYUP) }).count();
+        assert_eq!(ups * 2, keys.len());
+        assert_eq!(unsafe { super::switch_keys(3, 2)[2].Anonymous.ki.wVk }, VK_LEFT);
     }
 }

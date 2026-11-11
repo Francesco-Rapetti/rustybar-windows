@@ -2,7 +2,9 @@
 //! DIPs, the same on every screen; each bar scales them to its own.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
@@ -23,11 +25,39 @@ pub struct Item {
     pub max_width: Option<f32>,
     /// Shorter text is centered in this width.
     pub min_width: f32,
+    /// At least as wide as this text, and lined up on its left: a number that keeps its room
+    /// when it loses a digit (`"100%"`), so the pill doesn't change size.
+    pub fixed: Option<&'static str>,
+    /// The room before the item, instead of the pill's gap.
+    pub space: Option<f32>,
+    /// A glyph of Windows' icon font (Segoe Fluent Icons) instead of text.
+    pub icon: bool,
 }
 
 impl Item {
     pub fn text(text: impl Into<String>, color: Rgba) -> Item {
-        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0 }
+        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false }
+    }
+
+    /// An icon: a glyph of Segoe Fluent Icons (`"\u{E767}"`, the speaker).
+    pub fn icon(glyph: &str, color: Rgba) -> Item {
+        Item { icon: true, ..Item::text(glyph, color) }
+    }
+
+    /// In the theme's small font.
+    pub fn small(mut self) -> Item {
+        self.small = true;
+        self
+    }
+
+    pub fn fixed(mut self, template: &'static str) -> Item {
+        self.fixed = Some(template);
+        self
+    }
+
+    pub fn space(mut self, space: f32) -> Item {
+        self.space = Some(space);
+        self
     }
 
     pub fn max_width(mut self, width: f32) -> Item {
@@ -67,15 +97,18 @@ impl Pill {
 }
 
 /// A laid out item: where it starts in the pill, how wide it is, and its text ready to draw.
+#[derive(Clone)]
 pub struct Placed {
     pub x: f32,
     pub width: f32,
-    pub text_width: f32,
+    /// Where the text starts in the item's width.
+    pub text_x: f32,
     pub text_height: f32,
     pub layout: IDWriteTextLayout,
 }
 
 /// A pill measured: its width and its items, plus a signature of what it draws.
+#[derive(Clone)]
 pub struct Measured {
     pub key: String,
     pub pill: Pill,
@@ -89,18 +122,21 @@ pub struct Text {
     factory: IDWriteFactory,
     regular: IDWriteTextFormat,
     small: IDWriteTextFormat,
+    icons: IDWriteTextFormat,
     ellipsis: IDWriteInlineObject,
     small_ellipsis: IDWriteInlineObject,
     font_sig: u64,
+    /// The widths of the `fixed` templates, measured once.
+    templates: RefCell<HashMap<(&'static str, bool), f32>>,
 }
 
 impl Text {
     pub fn new(theme: &Theme) -> Result<Text> {
         unsafe {
             let factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let format = |weight, size: f32| -> Result<IDWriteTextFormat> {
+            let format = |family: &str, weight, size: f32| -> Result<IDWriteTextFormat> {
                 let f = factory.CreateTextFormat(
-                    &HSTRING::from(theme.font.as_str()),
+                    &HSTRING::from(family),
                     None,
                     weight,
                     DWRITE_FONT_STYLE_NORMAL,
@@ -111,19 +147,26 @@ impl Text {
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
                 Ok(f)
             };
-            let regular = format(DWRITE_FONT_WEIGHT_SEMI_BOLD, theme.font_size)?;
-            let small = format(DWRITE_FONT_WEIGHT_MEDIUM, theme.small_size)?;
+            let regular = format(&theme.font, DWRITE_FONT_WEIGHT_SEMI_BOLD, theme.font_size)?;
+            let small = format(&theme.font, DWRITE_FONT_WEIGHT_MEDIUM, theme.small_size)?;
+            let icons = format(icon_family(&factory), DWRITE_FONT_WEIGHT_REGULAR, theme.font_size + 1.0)?;
             let ellipsis = factory.CreateEllipsisTrimmingSign(&regular)?;
             let small_ellipsis = factory.CreateEllipsisTrimmingSign(&small)?;
             let mut h = DefaultHasher::new();
             (theme.font.as_str(), theme.font_size.to_bits(), theme.small_size.to_bits()).hash(&mut h);
-            Ok(Text { factory, regular, small, ellipsis, small_ellipsis, font_sig: h.finish() })
+            Ok(Text { factory, regular, small, icons, ellipsis, small_ellipsis, font_sig: h.finish(), templates: RefCell::new(HashMap::new()) })
         }
     }
 
     fn layout(&self, item: &Item) -> Result<(IDWriteTextLayout, f32, f32)> {
         let wide: Vec<u16> = item.text.encode_utf16().collect();
-        let (format, sign) = if item.small { (&self.small, &self.small_ellipsis) } else { (&self.regular, &self.ellipsis) };
+        let (format, sign) = if item.icon {
+            (&self.icons, &self.ellipsis)
+        } else if item.small {
+            (&self.small, &self.small_ellipsis)
+        } else {
+            (&self.regular, &self.ellipsis)
+        };
         unsafe {
             let layout = self.factory.CreateTextLayout(&wide, format, item.max_width.unwrap_or(10_000.0), 1_000.0)?;
             if item.max_width.is_some() {
@@ -140,6 +183,16 @@ impl Text {
         }
     }
 
+    fn template_width(&self, template: &'static str, small: bool) -> f32 {
+        if let Some(w) = self.templates.borrow().get(&(template, small)) {
+            return *w;
+        }
+        let item = Item { small, ..Item::text(template, Rgba::TRANSPARENT) };
+        let w = self.layout(&item).map(|(_, w, _)| w.ceil()).unwrap_or(0.0);
+        self.templates.borrow_mut().insert((template, small), w);
+        w
+    }
+
     /// Lays out a widget's pill: its items side by side, `gap` apart, inside the theme's padding.
     pub fn measure(&self, key: &str, pill: Pill, theme: &Theme) -> Result<Measured> {
         let mut x = theme.pill_padding;
@@ -149,12 +202,18 @@ impl Text {
         pill.highlight.hash(&mut h);
         for (i, item) in pill.items.iter().enumerate() {
             if i > 0 {
-                x += pill.gap;
+                x += item.space.unwrap_or(pill.gap);
             }
             let (layout, text_width, text_height) = self.layout(item)?;
-            let width = text_width.max(item.min_width);
-            (item.text.as_str(), item.color.bits(), item.small, width.to_bits()).hash(&mut h);
-            items.push(Placed { x, width, text_width, text_height, layout });
+            let (width, text_x) = match item.fixed {
+                Some(template) => (text_width.max(self.template_width(template, item.small)), 0.0),
+                None => {
+                    let width = text_width.max(item.min_width);
+                    (width, (width - text_width) / 2.0)
+                }
+            };
+            (item.text.as_str(), item.color.bits(), item.small, item.icon, width.to_bits(), text_x.to_bits()).hash(&mut h);
+            items.push(Placed { x, width, text_x, text_height, layout });
             x += width;
         }
         let width = (x + theme.pill_padding).ceil();
@@ -208,7 +267,6 @@ impl Font {
 pub enum Align {
     Start,
     Center,
-    #[allow(dead_code)] // For the popups to come: numbers on the right of a row
     End,
 }
 
@@ -235,18 +293,51 @@ impl Rect {
     }
 }
 
+/// A picture for a popup (a cover), decoded once: premultiplied BGRA, 4 bytes a pixel, row after
+/// row. `id` tells two pictures apart in a scene's signature without comparing the pixels.
+pub struct Image {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Image {} ({}×{})", self.id, self.width, self.height)
+    }
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Image) -> bool {
+        self.id == other.id
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Fill { rect: Rect, radius: f32, color: Rgba },
     Text { rect: Rect, text: String, font: Font, color: Rgba, align: Align },
+    /// A picture stretched over the rectangle, with its corners rounded.
+    Image { rect: Rect, radius: f32, image: Arc<Image> },
 }
 
 /// A part of the popup that can be clicked: under the mouse it gets the hover tint, in its shape.
+/// A slider gets no tint: a press on it, and a drag after the press, say where along it the
+/// mouse is (`Input::Slide`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Zone {
     pub rect: Rect,
     pub radius: f32,
     pub action: String,
+    pub slider: bool,
+}
+
+impl Zone {
+    /// Where `x` is along the zone, 0 to 1.
+    pub fn fraction(&self, x: f32) -> f32 {
+        if self.rect.w <= 0.0 { 0.0 } else { ((x - self.rect.x) / self.rect.w).clamp(0.0, 1.0) }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -270,8 +361,17 @@ impl Scene {
         self.shapes.push(Shape::Text { rect, text: text.into(), font, color, align });
     }
 
+    pub fn image(&mut self, rect: Rect, radius: f32, image: Arc<Image>) {
+        self.shapes.push(Shape::Image { rect, radius, image });
+    }
+
     pub fn zone(&mut self, rect: Rect, radius: f32, action: impl Into<String>) {
-        self.zones.push(Zone { rect, radius, action: action.into() });
+        self.zones.push(Zone { rect, radius, action: action.into(), slider: false });
+    }
+
+    /// A zone to press and drag along: a volume, a position.
+    pub fn slider(&mut self, rect: Rect, action: impl Into<String>) {
+        self.zones.push(Zone { rect, radius: 0.0, action: action.into(), slider: true });
     }
 
     /// The zone under a point, the last one added first.
@@ -295,6 +395,11 @@ impl Scene {
                     rect.hash_into(&mut h);
                     (text, font.size.to_bits(), font.weight, font.icons, color.bits(), align).hash(&mut h);
                 }
+                Shape::Image { rect, radius, image } => {
+                    2u8.hash(&mut h);
+                    rect.hash_into(&mut h);
+                    (radius.to_bits(), image.id).hash(&mut h);
+                }
             }
         }
         h.finish()
@@ -306,20 +411,20 @@ pub struct Fonts {
     factory: IDWriteFactory,
     family: HSTRING,
     icons: HSTRING,
-    formats: RefCell<Vec<(Font, IDWriteTextFormat)>>,
+    /// Each font's format, and the ellipsis that ends its text cut short.
+    formats: RefCell<Vec<(Font, IDWriteTextFormat, Option<IDWriteInlineObject>)>>,
 }
 
 impl Fonts {
     pub fn new(theme: &Theme) -> Result<Fonts> {
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        // Windows 11's icon font, or Windows 10's: the same code points for the same icons
-        let icons = if has_family(&factory, "Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
+        let icons = icon_family(&factory);
         Ok(Fonts { factory, family: HSTRING::from(theme.font.as_str()), icons: HSTRING::from(icons), formats: RefCell::new(Vec::new()) })
     }
 
-    fn format(&self, font: Font) -> Result<IDWriteTextFormat> {
-        if let Some((_, f)) = self.formats.borrow().iter().find(|(k, _)| *k == font) {
-            return Ok(f.clone());
+    fn format(&self, font: Font) -> Result<(IDWriteTextFormat, Option<IDWriteInlineObject>)> {
+        if let Some((_, f, sign)) = self.formats.borrow().iter().find(|(k, _, _)| *k == font) {
+            return Ok((f.clone(), sign.clone()));
         }
         let family = if font.icons { &self.icons } else { &self.family };
         let format = unsafe {
@@ -335,18 +440,20 @@ impl Fonts {
             f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
             f
         };
-        self.formats.borrow_mut().push((font, format.clone()));
-        Ok(format)
+        // Icons are never cut: no ellipsis for them
+        let sign = if font.icons { None } else { unsafe { self.factory.CreateEllipsisTrimmingSign(&format) }.ok() };
+        self.formats.borrow_mut().push((font, format.clone(), sign.clone()));
+        Ok((format, sign))
     }
 
-    /// `text` laid out on one line, cut at `max_width`, with its width and height.
+    /// `text` laid out on one line, cut at `max_width` with an ellipsis, with its width and height.
     pub fn layout(&self, text: &str, font: Font, max_width: f32) -> Result<(IDWriteTextLayout, f32, f32)> {
         let wide: Vec<u16> = text.encode_utf16().collect();
-        let format = self.format(font)?;
+        let (format, sign) = self.format(font)?;
         unsafe {
             let layout = self.factory.CreateTextLayout(&wide, &format, max_width.max(1.0), 1_000.0)?;
             let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
-            layout.SetTrimming(&trimming, None)?;
+            layout.SetTrimming(&trimming, sign.as_ref())?;
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;
             Ok((layout, m.widthIncludingTrailingWhitespace.min(max_width), m.height))
@@ -357,6 +464,11 @@ impl Fonts {
     pub fn width(&self, text: &str, font: Font) -> f32 {
         self.layout(text, font, 10_000.0).map(|(_, w, _)| w).unwrap_or(0.0)
     }
+}
+
+/// Windows 11's icon font, or Windows 10's: the same code points for the same icons.
+fn icon_family(factory: &IDWriteFactory) -> &'static str {
+    if has_family(factory, "Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" }
 }
 
 fn has_family(factory: &IDWriteFactory, name: &str) -> bool {

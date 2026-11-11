@@ -15,7 +15,7 @@ popup_gap = 6        # from the bottom of the bar to a popup
 # solarized-dark, solarized-light, tokyo-night, tokyo-night-storm, tokyo-night-moon,
 # tokyo-night-day. Every one has Catppuccin's color names.
 preset = "windows"
-primary = "accent"               # the highlight of the current desktop, and more to come
+primary = "accent"               # the highlight of the current desktop, the bars in the popups
 font = "Segoe UI Variable Text"
 font_size = 13
 small_size = 11
@@ -35,12 +35,13 @@ animations = true                # also off when Windows has animations off, or 
 
 [layout]
 left = ["workspaces", "front_app"]
-center = []
-right = ["clock"]
+center = ["media"]
+right = ["network", "audio", "system", "clock"]
 
 [games]
-# Executables that count as a game while in front, even in a window: no animations. Any app that
-# covers a screen without a title bar (a game, a video, F11) hides the bar of that screen anyway.
+# Executables that count as a game while in front, even in a window: no animations, and system
+# stops reading (the clock goes on). Any app that covers a screen without a title bar (a game, a
+# video, F11) hides the bar of that screen anyway.
 apps = []                        # e.g. ["wow.exe", "cs2.exe"]
 
 # Options of each widget, by its name in [layout]:
@@ -52,6 +53,32 @@ apps = []                        # e.g. ["wow.exe", "cs2.exe"]
 #
 # [widgets.workspaces]
 # single = false                 # show the pill with a single desktop too
+#
+# claude isn't in the default layout: it runs Claude Code for under a second every 5 minutes
+# (~0.4 s of CPU, ~190 MB while it runs). Add "claude" to [layout] to have it.
+# [widgets.claude]
+# dir = ""                       # Claude Code's config dir; "" for ~\.claude
+# color = "#d97757"              # the spark's color
+# path = ""                      # claude.exe; "" finds it (PATH, ~\.local\bin, the Claude app)
+# warning = 75
+# critical = 90
+# A second account: a widget of its own with its config dir.
+# [widgets.claude_work]
+# type = "claude"
+# dir = "~/.claude-work"
+# color = "#6a9bcc"
+#
+# [widgets.media]
+# paused = true                  # show a paused track, dimmed; false hides the pill while paused
+# cover = true                   # the cover in the popup; false never reads it
+#
+# [widgets.system]
+# interval = 5                   # seconds between readings (every 2 while the popup is open)
+# warning = 75                   # CPU, GPU and memory turn yellow from this percentage...
+# critical = 90                  # ...and red from this one
+# disk_warning = 90              # the same for the disks in the popup, in percent used
+# disk_critical = 95
+# gpu = true                     # false: no GPU in the pill and the popup
 #
 # Two widgets of the same kind: give the second a name of its own and its type.
 # [widgets.clock_utc]
