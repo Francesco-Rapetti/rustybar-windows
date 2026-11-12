@@ -74,6 +74,8 @@ pub enum Event {
     Resume,
     /// `rustybar msg`: the command's words, one a line, and the window to answer.
     Command { text: String, reply: HWND },
+    /// `rb.trigger` in a Lua widget: an event for the Lua widgets that listen to it.
+    Trigger { name: String, args: Vec<(String, String)> },
 }
 
 /// What `rustybar msg` takes.
@@ -84,6 +86,8 @@ pub const USAGE: &str = "usage: rustybar msg <command>
   popup <widget>    opens the widget's popup, or closes it if it's open
   shot <widget|bar[:left,center,right]> <file.png> [scale]
                     draws the widget's popup, or the pills, into a PNG (not the screen)
+  trigger <name> [key=value…]
+                    an event for the Lua widgets that listen to it
   quit              closes the bar";
 
 thread_local! {
@@ -112,6 +116,8 @@ pub struct App {
     theme: Theme,
     text: Text,
     widgets: Vec<Slot>,
+    /// The Lua state, while some widget of the layout is written in Lua.
+    lua: Option<crate::lua::Host>,
     /// The pills as last measured, by widget name.
     measured: HashMap<String, Measured>,
     // The popups and the bars go before the devices they draw with
@@ -179,8 +185,10 @@ impl App {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
         };
+        let (widgets, lua) = make_widgets(&config, &theme);
         let mut app = App {
-            widgets: make_widgets(&config),
+            widgets,
+            lua,
             measured: HashMap::new(),
             config,
             theme,
@@ -332,6 +340,7 @@ impl App {
                 let answer = self.command(&words);
                 ipc::answer(reply, self.control, &answer);
             }
+            Event::Trigger { name, args } => self.broadcast(&Signal::Trigger { name: &name, args: &args }),
         }
     }
 
@@ -352,6 +361,12 @@ impl App {
                 Ok(()) => "ok".into(),
                 Err(e) => e,
             },
+            // `key=value` pairs, for the Lua widgets that listen to `name`
+            ["trigger", name, pairs @ ..] => {
+                let args: Vec<(String, String)> = pairs.iter().map(|p| p.split_once('=').map_or((p.to_string(), String::new()), |(k, v)| (k.to_string(), v.to_string()))).collect();
+                self.broadcast(&Signal::Trigger { name, args: &args });
+                "ok".into()
+            }
             ["shot", target, path, rest @ ..] if rest.len() <= 1 => {
                 let scale = match rest.first().map(|s| s.parse::<f32>()) {
                     Some(Ok(s)) if (0.5..=4.0).contains(&s) => Some(s),
@@ -826,6 +841,9 @@ impl App {
 
     fn reload_theme(&mut self) {
         self.theme = Theme::from_config(&self.config.theme);
+        if let Some(host) = &self.lua {
+            host.set_theme(&self.theme);
+        }
         match Text::new(&self.theme) {
             Ok(text) => self.text = text,
             Err(e) => log!("fonts: {e}"),
@@ -1118,8 +1136,11 @@ impl App {
         self.drop_popups();
         let bars_changed = config.bar != self.config.bar;
         self.config = config;
-        self.widgets = make_widgets(&self.config);
+        // The old widgets, and the Lua state with them, go before the new ones come
+        self.widgets.clear();
+        self.lua = None;
         self.reload_theme();
+        (self.widgets, self.lua) = make_widgets(&self.config, &self.theme);
         let front = self.front.clone();
         self.broadcast(&Signal::Foreground(&front));
         // The new widgets start as if a bar showed and no game was in front
@@ -1288,9 +1309,22 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
     }
 }
 
-fn make_widgets(config: &Config) -> Vec<Slot> {
+/// The widgets of `[layout]`, and the Lua state when one of them is written in Lua: made only
+/// when the layout names a widget no built-in has and `widgets\*.lua` files are there.
+fn make_widgets(config: &Config, theme: &Theme) -> (Vec<Slot>, Option<crate::lua::Host>) {
+    let names: Vec<&String> = config.layout.left.iter().chain(&config.layout.center).chain(&config.layout.right).collect();
+    let needs_lua = names.iter().any(|n| !widgets::KINDS.contains(&config::widget_kind(config, n).as_str()));
+    let (host, errors) = match needs_lua.then(|| crate::lua::Host::load(&config::dir(), theme)).flatten() {
+        Some((host, errors)) => (Some(host), errors),
+        None => (None, Vec::new()),
+    };
+    for e in &errors {
+        log!("{e}");
+    }
+    // A widget whose file didn't load says why
+    let problem = (!errors.is_empty()).then(|| errors.join("\n"));
     let mut slots: Vec<Slot> = Vec::new();
-    let names = config.layout.left.iter().chain(&config.layout.center).chain(&config.layout.right);
+    let mut lua_used = false;
     for name in names {
         if slots.iter().any(|s| &s.name == name) {
             log!("{name} is in [layout] twice: shown once");
@@ -1300,10 +1334,15 @@ fn make_widgets(config: &Config) -> Vec<Slot> {
         let options = Options(config.widgets.get(name).cloned().unwrap_or_default());
         match widgets::create(&kind, &options) {
             Some(widget) => slots.push(Slot { name: name.clone(), widget }),
-            None => log!("unknown widget {name:?} (kinds: {})", widgets::KINDS.join(", ")),
+            None if host.is_some() => {
+                lua_used = true;
+                let widget = widgets::lua::LuaWidget::new(host.as_ref(), name, &kind, &options, problem.clone());
+                slots.push(Slot { name: name.clone(), widget: Box::new(widget) });
+            }
+            None => log!("unknown widget {name:?} (kinds: {}, or a Lua widget in widgets\\*.lua)", widgets::KINDS.join(", ")),
         }
     }
-    slots
+    (slots, host.filter(|_| lua_used))
 }
 
 fn monitors() -> Vec<(HMONITOR, RECT)> {
@@ -1330,11 +1369,12 @@ fn system_animations() -> bool {
     read.is_err() || on.as_bool()
 }
 
+/// The config dir and what's under it: the config files, and the Lua widgets in `widgets\`.
 fn watch_config_dir() -> Option<HANDLE> {
     let dir = config::dir();
     let _ = std::fs::create_dir_all(&dir);
     let wide = HSTRING::from(dir.to_string_lossy().as_ref());
-    match unsafe { FindFirstChangeNotificationW(&wide, false, FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME) } {
+    match unsafe { FindFirstChangeNotificationW(&wide, true, FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME) } {
         Ok(h) => Some(h),
         Err(e) => {
             log!("can't watch {}: {e}", dir.display());
@@ -1343,16 +1383,23 @@ fn watch_config_dir() -> Option<HANDLE> {
     }
 }
 
-/// When the config files were written, and how long they are: `rustybar.toml` and
-/// `rustybar.local.toml`. The dir's watch fires for any file in it; this tells theirs apart.
-type Stamp = [Option<(SystemTime, u64)>; 2];
+/// When the config files were written, and how long they are (`rustybar.toml` and
+/// `rustybar.local.toml`), and the same of the Lua files of `widgets\` (`lib\` too). The dir's
+/// watch fires for any file under it; this tells theirs apart.
+type Stamp = ([Option<(SystemTime, u64)>; 2], Vec<(std::path::PathBuf, SystemTime, u64)>);
 
 fn config_stamp() -> Stamp {
-    let stamp = |path: std::path::PathBuf| {
+    let stamp = |path: &std::path::Path| {
         let m = std::fs::metadata(path).ok()?;
         Some((m.modified().ok()?, m.len()))
     };
-    [stamp(config::file()), stamp(config::local_file())]
+    let lib = config::dir().join("widgets").join("lib");
+    let lua: Vec<_> = crate::lua::files(&config::dir())
+        .into_iter()
+        .chain(crate::lua::files_in(&lib))
+        .filter_map(|p| stamp(&p).map(|(t, l)| (p, t, l)))
+        .collect();
+    ([stamp(&config::file()), stamp(&config::local_file())], lua)
 }
 
 unsafe extern "system" fn on_winevent(_: HWINEVENTHOOK, event: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {

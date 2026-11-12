@@ -1339,21 +1339,33 @@ fn readable(aumid: &str) -> String {
 fn decode_cover(properties: &Properties) -> Option<Image> {
     let reference = properties.Thumbnail().ok()?;
     let stream = reference.OpenReadAsync().ok()?.join().ok()?;
-    decode(|wic| unsafe {
-        let source: IStream = CreateStreamOverRandomAccessStream(&stream)?;
-        wic.CreateDecoderFromStream(&source, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
-    })
+    decode(
+        |wic| unsafe {
+            let source: IStream = CreateStreamOverRandomAccessStream(&stream)?;
+            wic.CreateDecoderFromStream(&source, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+        },
+        COVER_PX,
+        COVER_PX,
+    )
 }
 
 /// A made-up cover, from its file (see `mock`).
 fn decode_cover_file(path: &std::path::Path) -> Option<Image> {
-    let path = HSTRING::from(path);
-    decode(|wic| unsafe { wic.CreateDecoderFromFilename(&path, None, GENERIC_READ, WICDecodeMetadataCacheOnDemand) })
+    decode_file(path, COVER_PX, COVER_PX)
 }
 
-/// A cover from the decoder `open` makes, cut to a square from its middle and scaled.
-fn decode(open: impl FnOnce(&IWICImagingFactory) -> windows::core::Result<IWICBitmapDecoder>) -> Option<Image> {
+/// A picture from a file, cut from its middle to the shape of `width` × `height` pixels and
+/// scaled to them: a made-up cover, the image of a Lua widget.
+pub fn decode_file(path: &std::path::Path, width: u32, height: u32) -> Option<Image> {
+    let path = HSTRING::from(path);
+    decode(|wic| unsafe { wic.CreateDecoderFromFilename(&path, None, GENERIC_READ, WICDecodeMetadataCacheOnDemand) }, width, height)
+}
+
+/// A picture from the decoder `open` makes, cut from its middle to the shape of `width` ×
+/// `height` and scaled to them, in premultiplied BGRA.
+fn decode(open: impl FnOnce(&IWICImagingFactory) -> windows::core::Result<IWICBitmapDecoder>, width: u32, height: u32) -> Option<Image> {
     static IDS: AtomicU64 = AtomicU64::new(1);
+    let (width, height) = (width.clamp(1, 4096), height.clamp(1, 4096));
     unsafe {
         // The pool's threads may have no COM yet: WIC needs it
         let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
@@ -1363,22 +1375,28 @@ fn decode(open: impl FnOnce(&IWICImagingFactory) -> windows::core::Result<IWICBi
             let frame = decoder.GetFrame(0)?;
             let (mut w, mut h) = (0u32, 0u32);
             frame.GetSize(&mut w, &mut h)?;
-            let side = w.min(h).max(1);
+            // The biggest part of the picture with the shape wanted, from its middle
+            let (w, h) = (w.max(1), h.max(1));
+            let (cw, ch) = if w as u64 * height as u64 > h as u64 * width as u64 {
+                (((h as u64 * width as u64) / height as u64).max(1) as u32, h)
+            } else {
+                (w, ((w as u64 * height as u64) / width as u64).max(1) as u32)
+            };
             let clipper = wic.CreateBitmapClipper()?;
-            let square = WICRect { X: ((w - side) / 2) as i32, Y: ((h - side) / 2) as i32, Width: side as i32, Height: side as i32 };
-            clipper.Initialize(&frame, &square)?;
+            let part = WICRect { X: ((w - cw) / 2) as i32, Y: ((h - ch) / 2) as i32, Width: cw as i32, Height: ch as i32 };
+            clipper.Initialize(&frame, &part)?;
             let scaler = wic.CreateBitmapScaler()?;
-            scaler.Initialize(&clipper, COVER_PX, COVER_PX, WICBitmapInterpolationModeHighQualityCubic)?;
+            scaler.Initialize(&clipper, width, height, WICBitmapInterpolationModeHighQualityCubic)?;
             let converter = wic.CreateFormatConverter()?;
             converter.Initialize(&scaler, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
-            let mut pixels = vec![0u8; (COVER_PX * COVER_PX * 4) as usize];
-            converter.CopyPixels(std::ptr::null(), COVER_PX * 4, &mut pixels)?;
-            Ok(Image { id: IDS.fetch_add(1, Ordering::Relaxed), width: COVER_PX, height: COVER_PX, pixels })
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            converter.CopyPixels(std::ptr::null(), width * 4, &mut pixels)?;
+            Ok(Image { id: IDS.fetch_add(1, Ordering::Relaxed), width, height, pixels })
         })();
         if initialized {
             CoUninitialize();
         }
-        image.map_err(|e| log!("media: cover: {e}")).ok()
+        image.map_err(|e| log!("image: {e}")).ok()
     }
 }
 

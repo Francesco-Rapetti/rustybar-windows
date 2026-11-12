@@ -422,6 +422,22 @@ impl Scene {
         self.zones.push(Zone { rect, radius: 0.0, action: action.into(), slider: true });
     }
 
+    /// The shapes and zones of `other`, moved by `dx`, `dy`, on top of these: a part laid out on
+    /// its own (to know its height first) put in its place.
+    pub fn append(&mut self, other: Scene, dx: f32, dy: f32) {
+        let moved = |r: Rect| Rect::new(r.x + dx, r.y + dy, r.w, r.h);
+        for shape in other.shapes {
+            self.shapes.push(match shape {
+                Shape::Fill { rect, radius, color } => Shape::Fill { rect: moved(rect), radius, color },
+                Shape::Text { rect, text, font, color, align } => Shape::Text { rect: moved(rect), text, font, color, align },
+                Shape::Image { rect, radius, image } => Shape::Image { rect: moved(rect), radius, image },
+            });
+        }
+        for zone in other.zones {
+            self.zones.push(Zone { rect: moved(zone.rect), ..zone });
+        }
+    }
+
     /// The zone under a point, the last one added first.
     pub fn zone_at(&self, x: f32, y: f32) -> Option<usize> {
         self.zones.iter().rposition(|z| z.rect.contains(x, y))

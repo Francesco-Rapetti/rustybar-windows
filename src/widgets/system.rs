@@ -432,7 +432,7 @@ impl super::Widget for System {
                     self.period = None;
                 }
             }
-            Signal::Foreground(_) | Signal::TimeChanged => return false,
+            Signal::Foreground(_) | Signal::TimeChanged | Signal::Trigger { .. } => return false,
         }
         self.schedule();
         self.shown_values() != before

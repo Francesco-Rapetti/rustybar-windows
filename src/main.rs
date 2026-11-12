@@ -15,6 +15,7 @@ mod install;
 mod ipc;
 mod json;
 mod log;
+mod lua;
 mod mock;
 mod net;
 mod palette;

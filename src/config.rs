@@ -175,25 +175,38 @@ pub fn merge(base: &mut toml::Table, more: toml::Table) {
     }
 }
 
-/// `rustybar check`: the config parses, its theme exists, and every name in `[layout]` is a widget.
+/// `rustybar check`: the config parses, its theme exists, the Lua widgets load, and every name in
+/// `[layout]` is a widget, built-in or in Lua.
 pub fn check() -> i32 {
     let (config, error) = load();
     let mut problems: Vec<String> = error.into_iter().collect();
     if !crate::theme::known(&config.theme.preset) {
         problems.push(format!("unknown theme preset {:?}", config.theme.preset));
     }
+    let lua = crate::lua::check(&dir(), &crate::theme::Theme::from_config(&config.theme));
+    let lua_names = match &lua {
+        Some((names, errors)) => {
+            problems.extend(errors.iter().cloned());
+            names.clone()
+        }
+        None => Vec::new(),
+    };
     for name in config.layout.left.iter().chain(&config.layout.center).chain(&config.layout.right) {
         let kind = widget_kind(&config, name);
-        if !crate::widgets::KINDS.contains(&kind.as_str()) {
+        if !crate::widgets::KINDS.contains(&kind.as_str()) && !lua_names.contains(&kind) {
             problems.push(format!("unknown widget {name:?} in [layout]"));
         }
     }
     if problems.is_empty() {
         let local = local_file();
+        let lua = match &lua {
+            Some((names, _)) if !names.is_empty() => format!(" (Lua: {})", names.join(", ")),
+            _ => String::new(),
+        };
         if local.exists() {
-            println!("{} + {}: ok", file().display(), local.display());
+            println!("{} + {}: ok{lua}", file().display(), local.display());
         } else {
-            println!("{}: ok", file().display());
+            println!("{}: ok{lua}", file().display());
         }
         0
     } else {

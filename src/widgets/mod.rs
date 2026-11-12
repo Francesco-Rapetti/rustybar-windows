@@ -17,6 +17,7 @@ pub mod docker;
 pub mod events;
 pub mod front_app;
 pub mod home;
+pub mod lua;
 pub mod media;
 pub mod network;
 pub mod power;
@@ -38,6 +39,9 @@ pub enum Signal<'a> {
     Shown(bool),
     /// Whether a game of `[games] apps` is in front: timers stop but the clock's.
     Game(bool),
+    /// `rustybar msg trigger <name> [key=value…]`, or `rb.trigger`: for the Lua widgets that
+    /// listen to it.
+    Trigger { name: &'a str, args: &'a [(String, String)] },
 }
 
 pub trait Widget {

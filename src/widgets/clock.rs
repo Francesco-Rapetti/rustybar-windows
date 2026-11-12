@@ -217,7 +217,7 @@ impl super::Widget for Clock {
                 false
             }
             // The bar still shows with a game in front: the clock goes on
-            super::Signal::Foreground(_) | super::Signal::Game(_) => false,
+            super::Signal::Foreground(_) | super::Signal::Game(_) | super::Signal::Trigger { .. } => false,
         }
     }
 

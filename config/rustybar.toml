@@ -35,6 +35,7 @@ animations = true                # also off when Windows has animations off, or 
 # base = "#1e1e2e"
 
 [layout]
+# Built-in widgets, and those written in Lua (widgets\*.lua next to this file, see the README)
 left = ["power", "workspaces", "front_app"]
 center = ["media"]
 right = ["network", "audio", "system", "clock"]

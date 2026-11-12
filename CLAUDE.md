@@ -210,7 +210,9 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   dei popup), `config.rs` (serde + toml, `deny_unknown_fields`, `rustybar check`,
   `rustybar.local.toml` fuso sopra con `merge`), `process.rs`
   (DPI per schermo, priorità sotto il normale, EcoQoS, memoria a priorità bassa, un'istanza per
-  cartella; `make_small` anche per il figlio di `claude`; `quit` di una cartella con attesa),
+  cartella; `make_small` anche per il figlio di `claude`; `quit` di una cartella con attesa;
+  `run`: un figlio piccolo, senza finestra, priorità idle, EcoQoS, nel job `KILL_ON_JOB_CLOSE`,
+  pipe lette mentre gira, timeout; lo usano `claude` e `rb.exec`),
   `install.rs` (`rustybar install`/`uninstall`), `stats.rs` (CPU, memoria, GPU dal
   kernel grafico, dischi, processi: le letture di `system`), `json.rs` (lettore JSON per le
   risposte di Claude Code), `log.rs`, `i18n.rs` (testi, numeri e misure col separatore della
@@ -503,7 +505,7 @@ in quest'ordine (le piccole prima, Lua e impostazioni per ultime):
    Calendar: Windows non ha un calendario leggibile da un'app non pacchettizzata), 7. `docker`
    (Engine API sulla named pipe di Docker Desktop) (fatti).
 8. Dati finti (`RUSTYBAR_MOCK`) e screenshot dei popup nel README (fatto, sotto).
-9. Widget in Lua, 10. finestra delle impostazioni (in un processo suo).
+9. Widget in Lua (fatto, sotto), 10. finestra delle impostazioni (in un processo suo).
 
 Lasciati fuori: `aerospace` (niente tiling WM per decisione), `battery` (questo PC non ha una
 batteria per provarlo), `notifications` (badge della taskbar e aggiornamenti alla brew non hanno
@@ -516,7 +518,8 @@ decisione) e il Wi-Fi acceso e spento, di `audio` il collegamento dei dispositiv
   `popup open`; ogni schermo con dimensioni, scala, visibile o nascosto, e il rettangolo di ogni
   pill in pixel dello schermo; `game in front`), `popup <widget>` (apre il popup sotto la pill
   dello schermo col mouse, o del primo schermo che la mostra; se è aperto lo chiude come un clic
-  sulla pill), `quit`. `trigger` arriva coi widget in Lua, gli unici che lo ascoltano. Trasporto:
+  sulla pill), `quit`, `trigger <nome> [chiave=valore…]` (per i widget in Lua, gli unici che lo
+  ascoltano), `shot`. Trasporto:
   `WM_COPYDATA` alla finestra di controllo della cartella di config (la stessa di `rustybar
   quit`), risposta con `WM_COPYDATA` alla finestra message-only del processo `msg` (solo a una
   finestra di classe `RustyBarMsg`, qualunque handle arrivi), che aspetta 5 s; il processo `msg`
@@ -570,7 +573,8 @@ lavoro, conti alla rovescia ogni minuto dai dati già letti; **`docker`** con Do
 la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
 
 - Rete e segreti: `net.rs` (WinHTTP: `request` sincrona per un thread di lavoro, con proxy di
-  sistema e gzip; `Socket` WebSocket asincrono: i callback di WinHTTP, sui suoi thread, mettono i
+  sistema e gzip (solo gzip: con `deflate` chiesto, Open-Meteo lo manda e WinHTTP fallisce alla
+  prima lettura con `E_ABORT`); `Socket` WebSocket asincrono: i callback di WinHTTP, sui suoi thread, mettono i
   messaggi in coda e impostano l'evento del widget; mai chiamate a WinHTTP col lock preso, perché
   possono richiamare subito sullo stesso thread; ogni handle con contesto tiene un `Arc` della
   connessione, lasciato a `HANDLE_CLOSING`; dopo l'upgrade nessun timeout di ricezione),
@@ -667,6 +671,66 @@ la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
   ognuno in parallelo, ogni 5 s solo a popup aperto) e disco su thread di lavoro; un solo
   `wake::Timer` per la prima scadenza. Docker spento: pipe riprovata ogni 30 s; niente senza
   barre visibili né con un gioco della lista. Dati finti in `examples/mock/docker.json`.
+
+Decisioni (con l'utente, 12/11/2026, per i widget in Lua; specifica proposta con i costi misurati
+da una sonda e confermata così com'era):
+
+- **Dipendenza**: `mlua` 0.12 con Lua 5.4 compilato dentro (`lua54`, `vendored`), lo stesso della
+  versione macOS; sempre nel binario (+~0,6 MB su disco: la sonda +584 KB), nessuna feature di
+  cargo per toglierlo. Lo stato Lua nasce solo se ci sono `widgets\*.lua`: senza, costo 0 a
+  riposo. Misurato: stato +24–28 KB privati, un widget +32–36 KB, `Lua::new` 0,2 ms, caricare
+  un widget 0,1 ms, `update` + `bar` 1,3 µs, un popup di 8 righe 11 µs.
+- **File**: `<cartella di config>\widgets\*.lua`, i nomi in `[layout]`, `[widgets.<nome>]` come
+  `self.options`.
+- **API come su macOS dove si può**: `rb.widget { name, init, every, update, bar, compact, popup,
+  event, on }`; pill di `text` e `icon` (codici di Segoe Fluent Icons) con colori della palette,
+  `small`, `fixed`, `max_width`, `highlight`, `bare`, `on_click`; `rb.redraw`, `rb.open`,
+  `rb.close_popup`, `rb.trigger`, `rb.color`, `rb.theme`, `rb.t(it, en)`, `rb.http` (WinHTTP su un
+  thread di lavoro, nessun processo) e `rb.exec` (un processo nascosto, priorità idle, nel job che
+  muore con la barra, timeout 30 s: costa un processo, documentato). `rb.home` dopo.
+- **Popup (b)**: una colonna dall'alto in basso coi pezzi nello stile dei popup di serie (testo,
+  sezione, riga etichetta/valore, pulsante, cursore, barra, riquadro, riquadri due per riga,
+  divisore, spazio, immagine), non il motore di layout completo della versione macOS.
+- **Eventi**: `on = { "wake", "foreground", "time", "game", "shown", "<trigger>" }` →
+  `event(self, nome, args)`; `rustybar msg trigger` e `rb.trigger` ai widget Lua.
+- **Ricarica ed errori**: un `.lua` cambiato ricarica tutti i widget Lua; `rustybar check` carica
+  gli script; un widget che sbaglia mostra `⚠ nome` in rosso e l'errore nel log e nel popup.
+- **Limiti**: 250 ms per chiamata, niente `os.execute`/`io.popen`/`os.exit`, `every` almeno 1 s,
+  timer fermi senza barre visibili e con un gioco della lista, 16 MB al massimo, GC completo alla
+  chiusura di un popup, nessun widget Lua nel layout predefinito.
+- Aggiunti scrivendo gli esempi (detti all'utente): `self.every` (`false` ferma il timer di uno
+  script, un numero lo riparte: un pomodoro fermo non sveglia la barra ogni secondo) e
+  `rb.json(testo)` (Lua non ha JSON; il lettore di `json.rs`).
+
+- Widget in Lua (fatto, 12/11/2026, come le decisioni sopra): `lua.rs` è lo stato (`Host`, in un
+  `Rc`, clonato da ogni widget Lua): `Lua::new()` (le librerie sicure) con `os.execute`,
+  `os.exit`, `io.popen`, `package.loadlib` tolti e `package.cpath` vuoto, `package.path` =
+  `widgets\lib\?.lua`; `set_memory_limit` a 16 MB; un hook ogni 10 000 istruzioni guarda la
+  scadenza (`BUDGET`, 250 ms) messa da `Host::call` (una chiamata dentro un'altra tiene quella di
+  fuori); `rb` (globale e `require("rustybar")`) con `widget`, `redraw` (vuota), `open`,
+  `close_popup` (un flag che `popup_input` legge: `Reply::Close`), `trigger` (`Event::Trigger`
+  nella coda dell'app → `Signal::Trigger` a tutti), `color`, `theme` (rifatto da `set_theme` a
+  ogni cambio di tema), `t`, `json`, `log` (anche `print`), `http` (`net::request` su un thread di
+  lavoro) ed `exec` (`cmd.exe /D /S /C` con `process::run`, 30 s); il preludio Lua fa `rb.ui`
+  (ogni costruttore mette `_t`). Il lavoro in sottofondo torna per `Channel`: ogni widget ha il
+  suo evento (`Wake`) e i suoi callback per id (al massimo 8 insieme); `Host::call` dice di chi
+  è la chiamata in corso. `widgets/lua.rs`: `LuaWidget` (`self` = tabella sua con `name` e
+  `options` dal TOML, `__index` alla definizione; `init` e `update` alla creazione; `every`
+  riletto dopo ogni chiamata che può cambiarlo; slot: l'evento e il timer), pill da `bar`
+  (`Item`/`Pill`; `fixed` vuole `&'static str`: i modelli tenuti per sempre, al massimo 256),
+  compatta da `compact` o `bar` con `ctx.compact`, azioni delle pill (funzione, URL, `"popup"`;
+  quelle degli elementi valgono per la forma piena), popup (`Lay`: colonna con `gap` 4, rientro
+  di 10 DIP per le righe, riquadri disposti prima a parte, `Scene::append`, per sapere l'altezza;
+  zone `a:<n>` e `s:<n>`; il cursore manda il valore al rilascio), immagini decodificate con
+  `media::decode_file` (WIC, ritaglio dal centro alla forma voluta, a 2×) e tenute finché il popup
+  è aperto. Errori: una riga senza traceback (`lua::short`), nel log una volta finché non cambia;
+  `bar` che fallisce → pill `⚠ nome` rossa e il popup con l'errore (anche un nome senza
+  definizione, o i file che non si caricano). L'app: Lua caricato in `make_widgets` solo se un
+  nome di `[layout]` non è un tipo di serie e ci sono file, e tenuto solo se un widget lo usa;
+  ricaricato con la config (il watcher guarda anche le sottocartelle, il timbro conta i `.lua` di
+  `widgets\` e `widgets\lib\`); `rustybar check` li carica e dice gli errori e i nomi Lua.
+  `examples/widgets`: `pomodoro.lua` (senza rete, timer solo mentre conta) e `weather.lua`
+  (Open-Meteo con `rb.http` e `rb.json`, ogni 15 minuti).
 
 ## Domande aperte (da decidere con l'utente)
 
@@ -898,3 +962,25 @@ la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
   `network` con la virgola fissa (ora col separatore della regione). Test: ogni JSON di
   `examples/mock` si legge. Binario ~1,93 MB. Non provati: i clic sui popup finti (cursori,
   muto, selettori del player e il clic su un desktop) e la barra finta col tema chiaro.
+  Committato e pushato (`002d86b`).
+- 12/11/2026, **widget in Lua** (punto 9; decisioni e com'è fatto in «Dalla versione macOS»).
+  Prima del codice una sonda (stesso profilo della barra) per i costi da proporre all'utente;
+  confermata la specifica così com'era. `process::run` preso da `claude.rs` (stesso
+  comportamento) per `rb.exec`. Test: 15 nuovi (sandbox, 250 ms, 16 MB, colori, opzioni, pill,
+  errori, eventi e trigger, `every` e `self.every`, popup con riquadri e cursore, `rb.exec` vero,
+  `rb.json`, icone): 68, più 3 ignorati che vanno in rete. Barra di prova sullo schermo
+  principale (`reserve = false`, `margin = 1200`) coi due esempi: `check` dice i nomi Lua e un
+  nome sbagliato; pill e popup
+  guardati con `msg shot` (il meteo vero di Roma da Open-Meteo); `msg trigger hello who=Alex`
+  cambia la pill di un widget che ascolta; un `.lua` salvato ricarica la barra (un salvataggio, uno
+  o due ricaricamenti); un `bar` che fallisce mostra `⚠ hello` in rosso e l'errore nel popup.
+  Trovato e corretto: `net::request` chiedeva anche `deflate`, e Open-Meteo lo manda (WinHTTP
+  falliva con `E_ABORT`): ora solo gzip, il calendario di Google di `events` si legge ancora (test
+  ignorato `a_server_that_likes_deflate`). Misure a riposo per 60 s, barra di prova con un
+  orologio: senza Lua 3,8 MB privati, 6,6 MB committed, 0,20 risvegli/s, 5 thread; con
+  `pomodoro` (fermo) e un widget che ascolta un trigger 2,6 MB privati, 7,3 MB committed (+0,7),
+  0 ms di CPU, 0,18 risvegli/s, 5 thread; col meteo dopo la sua richiesta HTTPS 5,2 MB privati,
+  8,4 MB committed, 1,17 risvegli/s, 7 thread (i thread di WinHTTP, come per `events`). Caricare
+  gli script: 1–6 ms; primo frame 36–46 ms. Binario ~2,66 MB (+0,73 MB: Lua e il suo codice).
+  Non provati: un clic vero col mouse nei popup Lua (coperti dai test di `popup_input`), un
+  `rb.exec` lungo che va in timeout, il tema chiaro, un widget Lua dentro il ⋯.

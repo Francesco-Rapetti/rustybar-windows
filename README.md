@@ -92,6 +92,8 @@ to that app, and the bar wouldn't start with Windows. Other commands:
   rustybar msg popup <widget>    open its popup on the screen with the mouse, or close it
   rustybar msg shot <what> <file.png> [scale]
                                  draw a popup, or the pills, into a PNG (see Made-up data)
+  rustybar msg trigger <name> [key=value…]
+                                 an event for the Lua widgets that listen to it
   rustybar msg quit              close the bar
   ```
 
@@ -268,6 +270,92 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
 
 `rustybar secret set|delete|check <name>` keeps the secrets of the widgets in Credential Manager
 (as `rustybar-<name>`), from stdin, so they never go through the command line or a file.
+
+## Lua widgets
+
+Every `widgets\*.lua` file next to the config (`%APPDATA%\rustybar\widgets`) can define widgets;
+put their names in `[layout]`, and their options in `[widgets.<name>]` as for any other.
+[examples/widgets](examples/widgets) has two to copy there: a pomodoro timer and the weather from
+Open-Meteo.
+
+```lua
+local rb = require("rustybar")
+
+rb.widget {
+  name = "weather",
+  every = 900,                         -- seconds between update() calls
+  update = function(self)
+    local url = "https://api.open-meteo.com/v1/forecast?latitude=" .. self.options.latitude
+      .. "&longitude=" .. self.options.longitude .. "&current=temperature_2m"
+    rb.http(url, function(body, status)
+      local data = status == 200 and rb.json(body)
+      if data then self.temp = data.current.temperature_2m end   -- the bar draws again after it
+    end)
+  end,
+  bar = function(self, ctx)
+    return rb.ui.pill { rb.ui.icon { "E9CA" }, rb.ui.text { self.temp and (self.temp .. "°") or "–" } }
+  end,
+  popup = function(self, ctx)
+    return rb.ui.column {
+      rb.ui.section { "Weather", right = self.temp and (self.temp .. "°") },
+      rb.ui.button { "Open-Meteo", on_click = "https://open-meteo.com" },
+    }
+  end,
+}
+```
+
+- **A widget**: `name`; `init(self)` once; `update(self)` at the start and every `every` seconds
+  (at least 1) while a bar shows and no listed game is in front, nothing without `every`; a
+  script stops its timer with `self.every = false` and starts it again with a number; `bar(self,
+  ctx)` for the pill, and `compact(self, ctx)` for the form of a bar without room (or `bar` with
+  `ctx.compact`); `popup(self, ctx)`; `event(self, name, args)` for the events named in `on`.
+  `self` is the widget's own table, with `self.name` and `self.options`: two widgets of the same
+  kind (`[widgets.weather_home] type = "weather"`) keep apart what they store. `ctx` has
+  `compact` and `popup_open`.
+- **Pill**: `rb.ui.pill { … }` of `rb.ui.text { "text" }` and `rb.ui.icon { "E9CA" }` (a code
+  point of Segoe Fluent Icons), or a plain string. Items take `color` (a palette name such as
+  `"primary"` or `"green@0.5"`, or `"#rrggbb"`), `small`, `fixed = "100%"` (as wide as that text
+  at least, so the pill keeps its size), `max_width`, `min_width`, `space` and `on_click`; the
+  pill takes `gap`, `highlight` (the item under the sliding highlight, from 1), `bare` (no
+  background, as the Windows logo) and `on_click`. `on_click` is a function, a URL or file to
+  open, or `"popup"`; a widget with `popup` opens it on a click.
+- **Popup**: a column, top to bottom, of `rb.ui.text` (`size`, `weight`, `color`, `align`,
+  `small`, `wrap`), `icon`, `section` (a title, `right =` a text), `row` (texts and icons side by
+  side, `right =`, `on_click`), `detail` (a label and its value), `button` (`icon`, `color`,
+  `on_click`), `slider` (`value` from 0 to 1, `on_change` with the value when the mouse goes up),
+  `progress` (`value`, `color`), `tile` (a box of its own pieces, `color`, `alert` to tint it,
+  `on_click`), `tiles` (tiles side by side, `columns = 2`, each row as tall as its tallest),
+  `divider`, `spacer` (`height`), `image` (a file next to the script, `width`, `height`,
+  `radius`), and `column` (`gap`) to group them; `width` on the outer column (320 by default).
+  These are the pieces of the built-in popups: there's no free layout of rows and columns as in
+  the macOS RustyBar.
+- **Functions**: `rb.http(url, [{ method, headers, body, timeout }], function(body, status,
+  error) end)` (WinHTTP, on a worker thread); `rb.exec(command, function(stdout, code, stderr)
+  end)` (a `cmd /c` without a window, at idle priority, ended after 30 s or with the bar); `rb.json(text)`;
+  `rb.open(target)`; `rb.close_popup()`; `rb.trigger(name, { key = "value" })`; `rb.color(name)`
+  and `rb.theme` (`font`, `font_size`, `small_size`, `dark`, `colors`); `rb.t("italiano",
+  "English")` for the language of Windows; `rb.log(…)` (and `print`) to the bar's log;
+  `rb.redraw()` does nothing (the bar draws again after every call). `require("name")` loads
+  `widgets\lib\name.lua`.
+- **Events** (`on = { … }`): `wake` (after a sleep; with `every`, `update` runs too), `foreground`
+  (`args.app`, `args.exe`), `time` (the clock or the time zone changed), `game` and `shown`
+  (`args.game`, `args.shown`), and any name sent by `rustybar msg trigger <name> [key=value…]` or
+  `rb.trigger`.
+
+Lua 5.4 runs inside the bar, on its main thread, in one state for every Lua widget: started only
+when `[layout]` names a widget no built-in has, so without Lua widgets nothing of it is in memory.
+A call that takes more than 250 ms is stopped, the state has 16 MB at most, and there's no
+`os.execute`, `io.popen`, `os.exit` or native module: what's slow goes through `rb.http` or
+`rb.exec`, whose answers come back to the callback without the bar waiting. Saving a `.lua` file
+reloads the bar, as the config does; `rustybar check` loads the scripts and says the first error
+of each. A widget that fails shows `⚠ name` in red, with the error in its popup and in the log.
+
+What it costs: the binary is ~0.7 MB larger with Lua in it, which takes no memory while no Lua
+widget runs. Measured with two Lua widgets (the pomodoro at rest and one that reacts to a
+trigger), against the same bar without them: +0.7 MB of memory, no CPU and no wake-ups at rest,
+and their first frame unchanged (loading the scripts takes about 1 ms). A widget that uses
+`rb.http` costs what `events` does (Windows keeps a couple of WinHTTP threads after a request);
+`rb.exec` starts a process each time it runs, the only way a script costs one: prefer `rb.http`.
 
 ## Made-up data
 

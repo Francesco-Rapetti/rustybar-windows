@@ -30,28 +30,21 @@
 //! With made-up data (see `mock`) the account is the one of `claude.json` whose `dir` is the
 //! widget's (`~/.claude` by default): nothing runs, and the buttons do nothing.
 
-use std::os::windows::io::AsRawHandle;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::Win32::Foundation::{FILETIME, HANDLE, SYSTEMTIME, WAIT_TIMEOUT};
-use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectExtendedLimitInformation, SetInformationJobObject,
-};
-use windows::Win32::System::Threading::WaitForSingleObject;
+use windows::Win32::Foundation::{FILETIME, HANDLE, SYSTEMTIME};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::HSTRING;
 
 use super::{Input, Reply, Signal};
 use crate::config::Options;
 use crate::i18n::t;
 use crate::json::Json;
 use crate::log;
-use crate::process;
+use crate::process::{self, Output};
 use crate::theme::{Rgba, Theme};
 use crate::ui::{Align, Font, Fonts, Item, Pill, Rect, Scene, Weight};
 use crate::wake::{Timer, Wake};
@@ -67,9 +60,6 @@ const FIRST: i64 = 3000;
 const FRESH: i64 = 60;
 /// How often the times in the open popup follow the clock, in ms.
 const TICK: i32 = 30_000;
-/// Flags of `CreateProcess`: no console window, idle priority.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
 
 // The popup's layout, in DIPs, as `system`'s.
 const MARGIN: f32 = 8.0;
@@ -571,41 +561,12 @@ impl super::Widget for Claude {
 
 // ---- Claude Code ---------------------------------------------------------------------------------
 
-struct Output {
-    ok: bool,
-    stdout: String,
-    stderr: String,
-}
-
-/// The job every child goes in: it ends them if the bar ends first.
-fn job() -> Option<HANDLE> {
-    struct Job(HANDLE);
-    unsafe impl Send for Job {}
-    unsafe impl Sync for Job {}
-    static JOB: OnceLock<Option<Job>> = OnceLock::new();
-    JOB.get_or_init(|| unsafe {
-        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits as *const _ as *const _, size_of_val(&limits) as u32).ok()?;
-        Some(Job(job))
-    })
-    .as_ref()
-    .map(|j| j.0)
-}
-
 /// Runs Claude Code with `args` for the account of `dir`, `input` on its stdin, at most `timeout`
-/// seconds: no window, idle priority, EcoQoS, in the job; the variables of a parent Claude Code
+/// seconds, as small as a child can be (`process::run`); the variables of a parent Claude Code
 /// removed.
 fn claude(path: &Path, dir: &Option<PathBuf>, args: &[&str], input: Option<&str>, timeout: u32) -> Output {
     let mut command = Command::new(path);
-    command
-        .args(args)
-        .current_dir(home())
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW | IDLE_PRIORITY_CLASS);
+    command.args(args).current_dir(home());
     for (name, _) in std::env::vars_os() {
         let upper = name.to_string_lossy().to_uppercase();
         if upper.starts_with("CLAUDE") || upper.starts_with("ANTHROPIC") {
@@ -616,41 +577,7 @@ fn claude(path: &Path, dir: &Option<PathBuf>, args: &[&str], input: Option<&str>
     if let Some(dir) = dir {
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
-    let failed = |e: String| Output { ok: false, stdout: String::new(), stderr: e };
-    let mut child = match command.spawn() {
-        Ok(c) => c,
-        Err(e) => return failed(e.to_string()),
-    };
-    let handle = HANDLE(child.as_raw_handle());
-    process::make_small(handle);
-    if let Some(job) = job() {
-        unsafe {
-            let _ = AssignProcessToJobObject(job, handle);
-        }
-    }
-    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-        use std::io::Write;
-        let _ = stdin.write_all(input.as_bytes());
-    }
-    // The pipes are read while it runs, so a long answer never blocks it
-    let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
-        std::thread::Builder::new().stack_size(64 * 1024).spawn(move || {
-            let mut s = String::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_string(&mut s);
-            }
-            s
-        })
-    };
-    let stdout = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
-    let stderr = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
-    if unsafe { WaitForSingleObject(handle, timeout * 1000) } == WAIT_TIMEOUT {
-        log!("claude: {} took more than {timeout} s", args.join(" "));
-        let _ = child.kill();
-    }
-    let ok = child.wait().is_ok_and(|s| s.success());
-    let text = |t: std::io::Result<std::thread::JoinHandle<String>>| t.ok().and_then(|h| h.join().ok()).unwrap_or_default();
-    Output { ok, stdout: text(stdout), stderr: text(stderr) }
+    process::run(command, input, timeout, &format!("claude {}", args.join(" ")))
 }
 
 /// The account and its numbers; with `status` who is logged in too. A failed reading keeps the

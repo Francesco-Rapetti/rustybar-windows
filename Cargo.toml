@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
+# Lua 5.4 for the widgets written in Lua, built in (no DLL): only started when there are some
+mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
 toml = { version = "1.2", default-features = false, features = ["parse", "serde"] }
 # The macros that implement COM interfaces (Core Audio's callbacks) name it: already a dependency
 # of `windows`
