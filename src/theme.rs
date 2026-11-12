@@ -50,7 +50,6 @@ pub const NAMES: [&str; 26] = [
 /// shades it lacks between the text and the background are blends of the two around them.
 pub struct Preset {
     pub name: &'static str,
-    #[allow(dead_code)]
     pub label: &'static str,
     /// The 14 accents, then the text down to the background, as in `NAMES`.
     colors: [u32; 26],
@@ -357,7 +356,7 @@ fn windows_palette() -> Vec<(&'static str, Rgba)> {
 }
 
 /// The colors of the preset called `name`, by palette name, with `accent` (a palette's `mauve`).
-fn palette(name: &str) -> Option<Vec<(&'static str, Rgba)>> {
+pub fn palette(name: &str) -> Option<Vec<(&'static str, Rgba)>> {
     if is_windows(name) {
         return Some(windows_palette());
     }

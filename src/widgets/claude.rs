@@ -49,7 +49,7 @@ use crate::theme::{Rgba, Theme};
 use crate::ui::{Align, Font, Fonts, Item, Pill, Rect, Scene, Weight};
 use crate::wake::{Timer, Wake};
 
-const ORANGE: &str = "#d97757";
+pub const ORANGE: &str = "#d97757";
 const USAGE: &str = "https://claude.ai/settings/usage";
 const SPARK: &str = "\u{273B}";
 /// How often the numbers are read, in ms; the first reading a few seconds after the start, so it
@@ -311,7 +311,8 @@ impl super::Widget for Claude {
         let numbers = a.and_then(|a| Some((a.session.as_ref()?, a.week.as_ref()?, a.stale)));
         let Some((session, week, stale)) = numbers else {
             let text = match a {
-                Some(a) if !a.logged_in => t("Accedi", "Sign in"),
+                // No answer from Claude Code (stale) isn't a signed-out account
+                Some(a) if !a.logged_in && !a.stale => t("Accedi", "Sign in"),
                 _ => "–",
             };
             return Some(Pill::new(vec![Item::text(SPARK, theme.subtext), Item::text(text, theme.subtext).small()]).gap(6.0));
@@ -473,6 +474,8 @@ impl super::Widget for Claude {
         } else if !logged_in {
             let (text, color) = if self.busy == Some(Job::Login) {
                 (t("Accedi nel browser…", "Sign in in the browser…"), theme.primary)
+            } else if a.is_some_and(|a| a.stale) {
+                (t("Claude Code non ha risposto: riprova all'apertura del popup", "Claude Code didn't answer: it tries again when the popup opens"), red)
             } else if self.login_failed {
                 (t("Accesso non riuscito: riprova", "Sign-in failed: try again"), red)
             } else {
@@ -589,7 +592,7 @@ fn read(path: &Path, dir: &Option<PathBuf>, status: bool, previous: Option<Accou
             let out = claude(path, dir, &["auth", "status", "--json"], None, 20);
             let Some(status) = Json::parse(out.stdout.trim()) else {
                 // No answer at all: the numbers of before, stale
-                return previous.map(|p| Account { stale: true, ..p }).unwrap_or_default();
+                return previous.map(|p| Account { stale: true, ..p }).unwrap_or(Account { stale: true, ..Account::default() });
             };
             if status["loggedIn"].bool() != Some(true) {
                 return Account::default();

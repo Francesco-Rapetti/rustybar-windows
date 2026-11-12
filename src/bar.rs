@@ -547,6 +547,14 @@ fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, th
     unsafe {
         for (item, placed) in m.pill.items.iter().zip(&m.items) {
             brush.SetColor(&gfx::color(item.color));
+            if let Some(image) = &item.image {
+                let size = placed.width;
+                let y = ((height - size) / 2.0 * s).round() / s;
+                if let Err(e) = crate::popup::draw_image(ctx, crate::ui::Rect::new(placed.x, y, size, size), 4.0, image) {
+                    crate::log!("pill image: {e}");
+                }
+                continue;
+            }
             let x = placed.x + placed.text_x;
             if item.logo {
                 for r in crate::ui::logo(x, 0.0, placed.width - placed.text_x, height, theme.font_size, s) {

@@ -3,7 +3,7 @@
   "logical": 16,
   "cpu": {"user": 12, "system": 6},
   "memory": {"total": 32, "used": 13.8, "committed": 19.6, "limit": 37.9},
-  "gpu": {"name": "Radeon RX 7700 XT", "use": 34, "temperature": 62, "hot": 95, "dedicated": 12, "used": 3.4},
+  "gpu": {"name": "Radeon RX 7700 XT", "use": 34, "temperature": 62, "hot": 95, "dedicated": 12, "used": 3.4, "clock": 2214, "memory_clock": 2250, "fan": 1460, "fan_max": 3300},
   "cpu_history": [9, 11, 8, 14, 22, 35, 41, 28, 19, 15, 12, 10, 13, 9, 8, 24, 52, 78, 64, 33, 21, 17, 14, 12, 16, 20, 15, 13, 17, 18],
   "gpu_history": [14, 15, 14, 16, 19, 24, 38, 42, 40, 36, 35, 35, 36, 34, 34, 40, 56, 81, 70, 46, 41, 39, 38, 37, 39, 32, 30, 29, 31, 34],
   "disks": [

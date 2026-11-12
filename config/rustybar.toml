@@ -6,6 +6,8 @@
 height = 40          # the bar, in DIPs; the pills are centered in it
 margin = 8           # from the screen edges to the first and last pill
 reserve = true       # reserve the strip, as the taskbar does: maximized windows stop under it
+screens = "all"      # all: a bar on every screen; primary: on the main one alone
+always_compact = []  # widgets in their compact form everywhere, room or not ("system")
 popup_gap = 6        # from the bottom of the bar to a popup
 
 [theme]

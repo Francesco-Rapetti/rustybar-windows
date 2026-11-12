@@ -6,7 +6,7 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, WAIT_TIMEOUT, WPARAM};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, TerminateJobObject,
     JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
@@ -194,6 +194,14 @@ pub fn run(mut command: std::process::Command, input: Option<&str>, timeout: u32
             let _ = AssignProcessToJobObject(job, handle);
         }
     }
+    // A job of its own too, nested in that one: at the timeout it ends what the command started
+    // as well (`cmd /c ping …`), whose pipes would keep the answer waiting
+    let own = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.ok();
+    if let Some(own) = own {
+        unsafe {
+            let _ = AssignProcessToJobObject(own, handle);
+        }
+    }
     if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
         use std::io::Write;
         let _ = stdin.write_all(input.as_bytes());
@@ -211,11 +219,24 @@ pub fn run(mut command: std::process::Command, input: Option<&str>, timeout: u32
     let stderr = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
     if unsafe { WaitForSingleObject(handle, timeout.saturating_mul(1000)) } == WAIT_TIMEOUT {
         log!("{label}: took more than {timeout} s");
-        let _ = child.kill();
+        match own {
+            Some(own) => unsafe {
+                let _ = TerminateJobObject(own, 1);
+            },
+            None => {
+                let _ = child.kill();
+            }
+        }
     }
     let status = child.wait().ok();
     let text = |t: std::io::Result<std::thread::JoinHandle<String>>| t.ok().and_then(|h| h.join().ok()).unwrap_or_default();
-    Output { ok: status.is_some_and(|s| s.success()), code: status.and_then(|s| s.code()).unwrap_or(-1), stdout: text(stdout), stderr: text(stderr) }
+    let (stdout, stderr) = (text(stdout), text(stderr));
+    if let Some(own) = own {
+        unsafe {
+            let _ = CloseHandle(own);
+        }
+    }
+    Output { ok: status.is_some_and(|s| s.success()), code: status.and_then(|s| s.code()).unwrap_or(-1), stdout, stderr }
 }
 
 /// Prints go to the terminal that started `rustybar check`, even though the binary is a GUI one.

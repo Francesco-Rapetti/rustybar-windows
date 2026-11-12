@@ -37,7 +37,7 @@ use crate::i18n::{number, size, t};
 use crate::json::Json;
 use crate::log;
 use crate::process;
-use crate::stats::{self, App, CpuShare, CpuTimes, Disk, Gpu, Memory, Processes};
+use crate::stats::{self, App, CpuShare, CpuTimes, Disk, Gpu, GpuPerf, Memory, Processes};
 use crate::theme::{Rgba, Theme};
 use crate::ui::{Align, Font, Fonts, Item, Pill, Rect, Scene, Weight};
 
@@ -86,6 +86,8 @@ struct Open {
     cpu_known: bool,
     disks: Vec<Disk>,
     video_memory: u64,
+    /// The clock of the 3D engine, in MHz.
+    clock: Option<u32>,
     /// The apps' names, by executable.
     names: HashMap<String, String>,
     readings: u32,
@@ -107,7 +109,11 @@ pub struct System {
     share: Option<CpuShare>,
     memory: Option<Memory>,
     gpu_use: Option<f64>,
-    temperature: Option<f32>,
+    /// The temperature, the fan and the memory's clock of the GPU.
+    perf: GpuPerf,
+    /// The GPU's temperature turns yellow and red from these, in °C.
+    temp_warning: f32,
+    temp_critical: f32,
     /// The last readings, numbered: CPU and GPU.
     history: VecDeque<(u64, u32, Option<u32>)>,
     readings: u64,
@@ -124,6 +130,7 @@ struct Mock {
     names: HashMap<String, String>,
     disks: Vec<Disk>,
     video_memory: u64,
+    clock: Option<u32>,
 }
 
 impl System {
@@ -152,7 +159,9 @@ impl System {
             share: None,
             memory: Memory::read(),
             gpu_use: None,
-            temperature: None,
+            perf: GpuPerf::default(),
+            temp_warning: 0.0,
+            temp_critical: 0.0,
             history: VecDeque::new(),
             readings: 0,
             shown: true,
@@ -161,7 +170,8 @@ impl System {
             open: None,
             mock: None,
         };
-        s.temperature = s.gpu.as_ref().and_then(Gpu::temperature);
+        s.perf = s.gpu.as_ref().map(Gpu::perf).unwrap_or_default();
+        (s.temp_warning, s.temp_critical) = thresholds(options, s.gpu.as_ref());
         s.schedule();
         s
     }
@@ -194,6 +204,7 @@ impl System {
             .iter()
             .map(|d| Disk { root: d["root"].str().unwrap_or_default().to_string(), label: d["label"].str().unwrap_or_default().to_string(), total: bytes(&d["total"]), free: bytes(&d["free"]) })
             .collect();
+        let (temp_warning, temp_critical) = thresholds(options, gpu.as_ref());
         System {
             timer: HANDLE::default(),
             period: None,
@@ -209,14 +220,20 @@ impl System {
             share: Some(CpuShare { kernel, user, idle: (1.0 - kernel - user).max(0.0) }),
             memory: Some(memory),
             gpu_use: g["use"].f64(),
-            temperature: g["temperature"].f64().map(|t| t as f32),
+            perf: GpuPerf {
+                temperature: g["temperature"].f64().map(|t| t as f32),
+                fan: g["fan"].f64().map(|f| (f as u32, g["fan_max"].f64().unwrap_or(0.0) as u32)),
+                memory_mhz: g["memory_clock"].f64().map(|m| m as u32),
+            },
+            temp_warning,
+            temp_critical,
             readings: history.len() as u64,
             history,
             shown: true,
             game: false,
             list: List::Cpu,
             open: None,
-            mock: Some(Mock { apps, names, disks, video_memory: bytes(&g["used"]) }),
+            mock: Some(Mock { apps, names, disks, video_memory: bytes(&g["used"]), clock: g["clock"].f64().map(|c| c as u32) }),
         }
     }
 
@@ -279,7 +296,7 @@ impl System {
         self.memory = Memory::read().or(self.memory);
         if let Some(gpu) = &mut self.gpu {
             self.gpu_use = gpu.usage().or(self.gpu_use);
-            self.temperature = gpu.temperature();
+            self.perf = gpu.perf();
         }
         if let Some(share) = self.share {
             self.readings += 1;
@@ -293,12 +310,14 @@ impl System {
     /// The popup's readings: the processes, the video memory, and now and then the disks.
     fn read_open(&mut self) {
         let gpu_memory = self.gpu.as_ref().map(Gpu::memory_used);
+        let clock = self.gpu.as_ref().and_then(Gpu::clock);
         let Some(open) = &mut self.open else { return };
         open.readings += 1;
         if let Some(apps) = open.processes.read() {
             open.apps = apps;
             open.cpu_known = true;
         }
+        open.clock = clock.or(open.clock);
         if let Some(used) = gpu_memory {
             open.video_memory = used;
         }
@@ -318,7 +337,7 @@ impl System {
 
     /// What the pill shows, to tell whether a reading changed it.
     fn shown_values(&self) -> (Option<u32>, Option<u32>, Option<u32>, Option<u32>, bool) {
-        (self.cpu(), self.gpu_use.map(percent), self.temperature.map(|t| t.round() as u32), self.ram(), self.paused())
+        (self.cpu(), self.gpu_use.map(percent), self.perf.temperature.map(|t| t.round() as u32), self.ram(), self.paused())
     }
 
     /// The numbers don't move: a listed game is in front, and the popup isn't open.
@@ -331,10 +350,12 @@ impl System {
     }
 
     fn temperature_color(&self, theme: &Theme, t: f32, normal: Rgba) -> Rgba {
-        match self.gpu.as_ref().and_then(|g| g.hot) {
-            Some(hot) if t >= hot => theme.color("red").unwrap_or(normal),
-            Some(hot) if t >= hot - 10.0 => theme.color("yellow").unwrap_or(normal),
-            _ => normal,
+        if t >= self.temp_critical {
+            theme.color("red").unwrap_or(normal)
+        } else if t >= self.temp_warning {
+            theme.color("yellow").unwrap_or(normal)
+        } else {
+            normal
         }
     }
 }
@@ -372,7 +393,7 @@ impl super::Widget for System {
         if self.gpu.is_some() {
             items.push(label("GPU", Some(12.0)));
             items.push(value(self.gpu_use.map(percent)));
-            if let Some(t) = self.temperature {
+            if let Some(t) = self.perf.temperature {
                 let color = if paused { theme.subtext } else { self.temperature_color(theme, t, theme.text) };
                 items.push(Item::text(format!("{}°", t.round()), color).fixed("100°"));
             }
@@ -432,7 +453,7 @@ impl super::Widget for System {
                     self.period = None;
                 }
             }
-            Signal::Foreground(_) | Signal::TimeChanged | Signal::Trigger { .. } => return false,
+            Signal::Foreground(_) | Signal::TimeChanged | Signal::Trigger { .. } | Signal::DevicesChanged | Signal::Displays => return false,
         }
         self.schedule();
         self.shown_values() != before
@@ -450,6 +471,7 @@ impl super::Widget for System {
                 cpu_known: true,
                 disks: m.disks.clone(),
                 video_memory: m.video_memory,
+                clock: m.clock,
                 names: m.names.clone(),
                 readings: 0,
             });
@@ -464,6 +486,7 @@ impl super::Widget for System {
                 cpu_known: false,
                 disks: stats::disks(),
                 video_memory: self.gpu.as_ref().map_or(0, Gpu::memory_used),
+                clock: self.gpu.as_ref().and_then(Gpu::clock),
                 names: HashMap::new(),
                 readings: 0,
             };
@@ -490,11 +513,17 @@ impl super::Widget for System {
         let width = if gpu.is_some() { TILE } else { WIDE };
         self.gauge(&mut scene, theme, fonts, Rect::new(MARGIN, y, width, GAUGE_H), "CPU", (cores, theme.subtext), self.cpu(), false);
         if gpu.is_some() {
-            let note = match self.temperature {
-                Some(t) => (format!("{} °C", t.round()), self.temperature_color(theme, t, theme.subtext)),
-                None => (String::new(), theme.subtext),
-            };
-            self.gauge(&mut scene, theme, fonts, Rect::new(MARGIN + TILE + GAP, y, TILE, GAUGE_H), "GPU", note, self.gpu_use.map(percent), true);
+            // The temperature and the fan by the label, the engine's clock by the value
+            let fan = self.perf.fan.map(|(rpm, _)| if rpm == 0 { t("ventola ferma", "fan stopped").to_string() } else { format!("{rpm} rpm") });
+            let temperature = self.perf.temperature.map(|t| format!("{} °C", t.round()));
+            let note_text = [temperature, fan].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            let note_color = self.perf.temperature.map_or(theme.subtext, |t| self.temperature_color(theme, t, theme.subtext));
+            let r = Rect::new(MARGIN + TILE + GAP, y, TILE, GAUGE_H);
+            self.gauge(&mut scene, theme, fonts, r, "GPU", (note_text, note_color), self.gpu_use.map(percent), true);
+            if let Some(mhz) = open.clock {
+                let small = Font::new(theme.small_size, Weight::Medium);
+                scene.text(Rect::new(r.x + PAD, r.y + PAD + HEAD + 4.0, r.w - 2.0 * PAD, VALUE), format!("{} MHz", number(mhz as f64, 0)), small, theme.subtext, Align::End);
+            }
         }
         y += GAUGE_H + GAP;
 
@@ -520,7 +549,13 @@ impl super::Widget for System {
         if let Some(gpu) = video {
             let meter = Meter {
                 label: t("Memoria video", "Video memory").into(),
-                note: (gpu.name.clone(), theme.subtext),
+                note: (
+                    match self.perf.memory_mhz {
+                        Some(mhz) => format!("{} · {} MHz", gpu.name, number(mhz as f64, 0)),
+                        None => gpu.name.clone(),
+                    },
+                    theme.subtext,
+                ),
                 value: size(open.video_memory),
                 of: format!("{} {}", t("di", "of"), size(gpu.dedicated)),
                 value_color: theme.text,
@@ -732,6 +767,16 @@ fn heading(scene: &mut Scene, theme: &Theme, fonts: &Fonts, r: Rect, label: &str
 
 fn big() -> Font {
     Font::new(17.0, Weight::SemiBold)
+}
+
+/// Where the GPU's temperature turns yellow and red, in °C: `temp_warning` and `temp_critical`,
+/// else 10° under the one the driver calls high and that one, else 85 and 95 (some Radeons'
+/// drivers don't say).
+fn thresholds(options: &Options, gpu: Option<&Gpu>) -> (f32, f32) {
+    let hot = gpu.and_then(|g| g.hot);
+    let critical = options.f64("temp_critical").map_or(hot.unwrap_or(95.0), |v| v as f32);
+    let warning = options.f64("temp_warning").map_or(hot.map_or(85.0, |h| h - 10.0), |v| v as f32);
+    (warning.min(critical), critical)
 }
 
 /// A share as a whole percentage, for the bar.

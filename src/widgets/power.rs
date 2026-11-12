@@ -2,7 +2,7 @@
 //! its popup what the Start menu's power button and the Win+X menu do, with the same words, as the
 //! Apple menu of the macOS version. About
 //! this PC; Task Manager and Settings; Sleep, Restart and Shut down; Lock and Sign out (with the
-//! account's name); last the config of RustyBar.
+//! account's name); last the settings of RustyBar (its own window, `rustybar settings`).
 //!
 //! Restart, Shut down and Sign out ask for a second click, the row in red meanwhile: a slip of the
 //! mouse doesn't end a game. Shut down uses fast startup when Windows has it on, and restart and
@@ -23,19 +23,20 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
 use windows::Win32::System::Power::SetSuspendState;
-use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_NOTIFY, KEY_READ, REG_NOTIFY_CHANGE_NAME, REG_NOTIFY_THREAD_AGNOSTIC, RRF_RT_REG_DWORD, RegCloseKey,
+    RegGetValueW, RegNotifyChangeKeyValue, RegOpenKeyExW,
+};
 use windows::Win32::System::Shutdown::{
     EWX_HYBRID_SHUTDOWN, EWX_LOGOFF, EWX_POWEROFF, EWX_REBOOT, EWX_RESTARTAPPS, EWX_SHUTDOWN, EXIT_WINDOWS_FLAGS, ExitWindowsEx,
     LockWorkStation, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER, SHTDN_REASON_MINOR_OTHER,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::WindowsProgramming::GetUserNameW;
-use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
 use windows::core::{HSTRING, PCWSTR, PWSTR, s, w};
 
-use super::{Input, Reply};
-use crate::config;
+use super::{Input, Reply, Signal};
 use crate::i18n::t;
 use crate::log;
 use crate::process;
@@ -50,6 +51,8 @@ const DIVIDER_H: f32 = 9.0;
 const PAD: f32 = 12.0;
 const ICON_W: f32 = 16.0;
 const MIN_WIDTH: f32 = 240.0;
+/// Where Windows Update keeps its state: a `RebootRequired` subkey while it waits for a restart.
+const UPDATE_KEY: PCWSTR = w!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update");
 
 /// A line of the menu: a command, or a divider.
 enum Line {
@@ -65,21 +68,87 @@ pub struct Power {
     confirm: Option<&'static str>,
     /// The command that Windows refused.
     failed: Option<&'static str>,
+    /// Windows Update waits for a restart: a dot by the logo and a row in the menu.
+    update: bool,
+    /// The `Auto Update` key, watched for its subkeys while a bar shows, and the event it sets.
+    watch: Option<(HKEY, HANDLE)>,
     /// The made-up name, with made-up data (see `mock`).
     mock: Option<String>,
 }
 
 impl Power {
     pub fn new() -> Power {
-        let mock = crate::mock::load("power").map(|m| m["user"].str().unwrap_or_default().to_string());
-        Power { mock, ..Power::default() }
+        if let Some(m) = crate::mock::load("power") {
+            let user = m["user"].str().unwrap_or_default().to_string();
+            let mut power = Power::default();
+            (power.mock, power.update) = (Some(user), m["update"].bool().unwrap_or(false));
+            return power;
+        }
+        let mut power = Power::default();
+        power.watch_updates();
+        power
+    }
+
+    /// Watches the `Auto Update` key for a subkey that comes or goes (`RebootRequired`): Windows
+    /// Update writes values there now and then, but those don't wake the bar.
+    fn watch_updates(&mut self) {
+        if self.mock.is_some() || self.watch.is_some() {
+            return;
+        }
+        let mut key = HKEY::default();
+        if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, UPDATE_KEY, Some(0), KEY_READ | KEY_NOTIFY, &mut key) }.is_err() {
+            return;
+        }
+        let Ok(event) = (unsafe { CreateEventW(None, false, false, None) }) else {
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
+            return;
+        };
+        self.watch = Some((key, event));
+        self.arm();
+        self.update = self.reboot_required();
+    }
+
+    fn arm(&self) {
+        let Some((key, event)) = self.watch else { return };
+        let result = unsafe { RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC, Some(event), true) };
+        if result.is_err() {
+            log!("power: can't watch Windows Update ({result:?})");
+        }
+    }
+
+    fn unwatch(&mut self) {
+        if let Some((key, event)) = self.watch.take() {
+            unsafe {
+                let _ = RegCloseKey(key);
+                let _ = CloseHandle(event);
+            }
+        }
+    }
+
+    fn reboot_required(&self) -> bool {
+        let Some((key, _)) = self.watch else { return false };
+        let mut sub = HKEY::default();
+        let found = unsafe { RegOpenKeyExW(key, w!("RebootRequired"), Some(0), KEY_READ, &mut sub) }.is_ok();
+        if found {
+            unsafe {
+                let _ = RegCloseKey(sub);
+            }
+        }
+        found
     }
 
     fn lines(&self) -> Vec<Line> {
         let row = |action, icon, text: &str, shortcut| Line::Row { action, icon, text: text.to_string(), shortcut };
         let user = self.user.as_deref().unwrap_or_default();
         let sign_out = if user.is_empty() { t("Disconnetti", "Sign out").to_string() } else { format!("{} {user}", t("Disconnetti", "Sign out")) };
-        vec![
+        let mut lines = Vec::new();
+        if self.update {
+            lines.push(row("update", "\u{E895}", t("Riavvia per completare gli aggiornamenti", "Restart to finish the updates"), ""));
+            lines.push(Line::Divider);
+        }
+        lines.extend([
             row("about", "\u{E946}", t("Informazioni su questo PC", "About this PC"), ""),
             Line::Divider,
             row("taskmgr", "\u{F120}", t("Gestione attività", "Task Manager"), t("Ctrl+Maiusc+Esc", "Ctrl+Shift+Esc")),
@@ -92,8 +161,9 @@ impl Power {
             row("lock", "\u{E72E}", t("Blocca", "Lock"), "Win+L"),
             Line::Row { action: "signout", icon: "\u{F3B1}", text: sign_out, shortcut: "" },
             Line::Divider,
-            row("config", "", t("Config di RustyBar…", "RustyBar config…"), ""),
-        ]
+            row("rustybar", "", t("Impostazioni di RustyBar…", "RustyBar settings…"), ""),
+        ]);
+        lines
     }
 
     /// What a row says while it waits for its second click, or after Windows refused it.
@@ -112,10 +182,50 @@ impl Power {
     }
 }
 
+impl Drop for Power {
+    fn drop(&mut self) {
+        self.unwatch();
+    }
+}
+
 impl super::Widget for Power {
     fn pill(&self, theme: &Theme) -> Option<Pill> {
-        // No background: the logo stands on the desktop, as the apple in the macOS menu bar
-        Some(Pill::new(vec![Item::windows_logo(theme.text)]).bare())
+        // No background: the logo stands on the desktop, as the apple in the macOS menu bar; with
+        // a dot by it while Windows Update waits for a restart, as Start's power button has
+        let mut items = vec![Item::windows_logo(theme.text)];
+        if self.update {
+            items.push(Item::text("\u{25CF}", theme.color("peach").unwrap_or(theme.primary)).small().space(2.0));
+        }
+        Some(Pill::new(items).bare())
+    }
+
+    fn handle(&self) -> Option<HANDLE> {
+        self.watch.map(|(_, event)| event)
+    }
+
+    /// A subkey of `Auto Update` came or went.
+    fn signaled(&mut self) -> bool {
+        self.arm();
+        let update = self.reboot_required();
+        let changed = update != self.update;
+        self.update = update;
+        changed
+    }
+
+    /// Nothing is watched while no bar shows.
+    fn event(&mut self, signal: &Signal) -> bool {
+        match signal {
+            Signal::Shown(true) if self.watch.is_none() && self.mock.is_none() => {
+                let before = self.update;
+                self.watch_updates();
+                before != self.update
+            }
+            Signal::Shown(false) => {
+                self.unwatch();
+                false
+            }
+            _ => false,
+        }
     }
 
     fn has_popup(&self) -> bool {
@@ -187,7 +297,8 @@ impl super::Widget for Power {
             "shutdown" => "shutdown",
             "lock" => "lock",
             "signout" => "signout",
-            "config" => "config",
+            "rustybar" => "rustybar",
+            "update" => "update",
             _ => return Reply::Nothing,
         };
         self.failed = None;
@@ -201,6 +312,10 @@ impl super::Widget for Power {
             return Reply::Close;
         }
         let done = match action {
+            "update" => {
+                process::open("ms-settings:windowsupdate");
+                true
+            }
             "about" => {
                 process::open("ms-settings:about");
                 true
@@ -213,10 +328,7 @@ impl super::Widget for Power {
                 process::open("ms-settings:");
                 true
             }
-            "config" => {
-                open_config();
-                true
-            }
+            "rustybar" => open_settings(),
             "lock" => unsafe { LockWorkStation() }.map_err(|e| log!("lock: {e}")).is_ok(),
             "sleep" => {
                 // On a thread: Windows tells every window the PC is going to sleep, this one's too,
@@ -362,21 +474,18 @@ fn full_name() -> Option<String> {
     }
 }
 
-/// Opens `rustybar.toml` in the app Windows has for it, or in Notepad; writes the example first if
-/// there's no file yet.
-fn open_config() {
-    let path = config::file();
-    if !path.exists() {
-        let _ = std::fs::create_dir_all(config::dir());
-        let _ = std::fs::write(&path, crate::install::EXAMPLE);
-    }
-    let file = HSTRING::from(path.to_string_lossy().as_ref());
+/// Opens the settings window, `rustybar settings`: a process of its own, out of the bar, that ends
+/// when the window closes. It may take the front: the user just clicked the menu.
+fn open_settings() -> bool {
+    let Ok(me) = std::env::current_exe() else { return false };
     unsafe {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
-        // Above 32 is success; no app for .toml is 31
-        if ShellExecuteW(None, w!("open"), &file, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL).0 as isize <= 32 {
-            let quoted = HSTRING::from(format!("\"{}\"", path.display()));
-            ShellExecuteW(None, w!("open"), w!("notepad.exe"), &quoted, PCWSTR::null(), SW_SHOWNORMAL);
+    }
+    match std::process::Command::new(me).arg("settings").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+        Ok(_) => true,
+        Err(e) => {
+            log!("settings: {e}");
+            false
         }
     }
 }

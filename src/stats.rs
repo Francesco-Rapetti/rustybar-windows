@@ -9,11 +9,11 @@ use std::time::Instant;
 
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMT_ADAPTER_PERFDATA, D3DKMT_ADAPTER_PERFDATACAPS, D3DKMT_ADAPTERINFO, D3DKMT_ADAPTERREGISTRYINFO, D3DKMT_ADAPTERTYPE,
-    D3DKMT_CLOSEADAPTER, D3DKMT_ENUMADAPTERS2, D3DKMT_NODEMETADATA, D3DKMT_QUERYADAPTERINFO, D3DKMT_QUERYSTATISTICS,
+    D3DKMT_CLOSEADAPTER, D3DKMT_ENUMADAPTERS2, D3DKMT_NODE_PERFDATA, D3DKMT_NODEMETADATA, D3DKMT_QUERYADAPTERINFO, D3DKMT_QUERYSTATISTICS,
     D3DKMT_QUERYSTATISTICS_ADAPTER, D3DKMT_QUERYSTATISTICS_NODE, D3DKMT_QUERYSTATISTICS_SEGMENT, D3DKMT_SEGMENTSIZEINFO,
     D3DKMTCloseAdapter, D3DKMTEnumAdapters2, D3DKMTQueryAdapterInfo, D3DKMTQueryStatistics, DXGK_ENGINE_TYPE_3D,
     KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERPERFDATA_CAPS, KMTQAITYPE_ADAPTERREGISTRYINFO, KMTQAITYPE_ADAPTERTYPE,
-    KMTQAITYPE_GETSEGMENTSIZE, KMTQAITYPE_NODEMETADATA, KMTQUERYADAPTERINFOTYPE,
+    KMTQAITYPE_GETSEGMENTSIZE, KMTQAITYPE_NODEMETADATA, KMTQAITYPE_NODEPERFDATA, KMTQUERYADAPTERINFOTYPE,
 };
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{FILETIME, LUID, STATUS_INFO_LENGTH_MISMATCH};
@@ -137,6 +137,17 @@ impl Memory {
 /// discrete one, on a PC that also has one in the CPU). Its use is that of its 3D engines, the
 /// ones games draw with: every engine read is a call into the driver (~0.2 ms each on a Radeon,
 /// and it has 15), so the others (video, copies, compute) are left out.
+/// The temperature, the fan and the memory's clock of the GPU (see `Gpu::perf`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuPerf {
+    /// °C.
+    pub temperature: Option<f32>,
+    /// The fan's speed and its top speed (0 if unknown), in rpm.
+    pub fan: Option<(u32, u32)>,
+    /// MHz.
+    pub memory_mhz: Option<u32>,
+}
+
 pub struct Gpu {
     luid: LUID,
     adapter: u32,
@@ -149,6 +160,8 @@ pub struct Gpu {
     last: Option<(Vec<i64>, Instant)>,
     /// The temperature the driver says is high, in °C, if it says.
     pub hot: Option<f32>,
+    /// The fan's top speed, in rpm; 0 if the driver doesn't say.
+    max_fan: u32,
 }
 
 fn query<T>(adapter: u32, kind: KMTQUERYADAPTERINFOTYPE, data: &mut T) -> bool {
@@ -216,10 +229,11 @@ impl Gpu {
             nodes.push(0);
         }
         let mut caps = D3DKMT_ADAPTER_PERFDATACAPS::default();
-        let hot = (query(a.hAdapter, KMTQAITYPE_ADAPTERPERFDATA_CAPS, &mut caps) && caps.TemperatureWarning > 0)
-            .then(|| caps.TemperatureWarning as f32 / 10.0);
+        let caps_ok = query(a.hAdapter, KMTQAITYPE_ADAPTERPERFDATA_CAPS, &mut caps);
+        let hot = (caps_ok && caps.TemperatureWarning > 0).then(|| caps.TemperatureWarning as f32 / 10.0);
+        let max_fan = if caps_ok { caps.MaxFanRPM } else { 0 };
         log!("GPU: {name}, {} MB, 3D engines {nodes:?} of {}", dedicated >> 20, info.NodeCount);
-        Some(Gpu { luid: a.AdapterLuid, adapter: a.hAdapter, name, dedicated, segments: info.NbSegments, nodes, last: None, hot })
+        Some(Gpu { luid: a.AdapterLuid, adapter: a.hAdapter, name, dedicated, segments: info.NbSegments, nodes, last: None, hot, max_fan })
     }
 
     /// How busy the 3D engines were since the last reading, 0 to 100: the busiest one. None the
@@ -246,10 +260,28 @@ impl Gpu {
         usage
     }
 
-    /// The temperature, in °C, if the driver tells it (as it does to Task Manager).
-    pub fn temperature(&self) -> Option<f32> {
+    /// What the driver says besides the use, as it does to Task Manager: the temperature, the
+    /// fan and the memory's clock, in one call of a few µs. Not the `Power` field: its unit
+    /// (tenths of a percent of what?) isn't the same for every driver.
+    pub fn perf(&self) -> GpuPerf {
         let mut perf = D3DKMT_ADAPTER_PERFDATA::default();
-        (query(self.adapter, KMTQAITYPE_ADAPTERPERFDATA, &mut perf) && perf.Temperature > 0).then(|| perf.Temperature as f32 / 10.0)
+        if self.adapter == 0 || !query(self.adapter, KMTQAITYPE_ADAPTERPERFDATA, &mut perf) {
+            return GpuPerf::default();
+        }
+        GpuPerf {
+            temperature: (perf.Temperature > 0).then(|| perf.Temperature as f32 / 10.0),
+            // A fan that stands still (as some do while the GPU is cool) says 0 rpm
+            fan: (self.max_fan > 0 || perf.FanRPM > 0).then_some((perf.FanRPM, self.max_fan)),
+            memory_mhz: (perf.MemoryFrequency > 0).then_some((perf.MemoryFrequency / 1_000_000) as u32),
+        }
+    }
+
+    /// The clock of the 3D engine now, in MHz: ~0.3 ms in the driver of a Radeon, so only for
+    /// the open popup.
+    pub fn clock(&self) -> Option<u32> {
+        let node = *self.nodes.first()?;
+        let mut perf = D3DKMT_NODE_PERFDATA { NodeOrdinal: node, PhysicalAdapterIndex: 0, ..Default::default() };
+        (self.adapter != 0 && query(self.adapter, KMTQAITYPE_NODEPERFDATA, &mut perf) && perf.Frequency > 0).then_some((perf.Frequency / 1_000_000) as u32)
     }
 
     /// The dedicated video memory in use, in bytes: what's resident in the segments that aren't
@@ -273,7 +305,7 @@ impl Gpu {
 
     /// A made-up GPU (see `mock`), with no adapter behind it: its readings are the widget's.
     pub fn mock(name: String, dedicated: u64, hot: Option<f32>) -> Gpu {
-        Gpu { luid: LUID::default(), adapter: 0, name, dedicated, segments: 0, nodes: Vec::new(), last: None, hot }
+        Gpu { luid: LUID::default(), adapter: 0, name, dedicated, segments: 0, nodes: Vec::new(), last: None, hot, max_fan: 0 }
     }
 }
 

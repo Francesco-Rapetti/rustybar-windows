@@ -8,6 +8,7 @@
   "wifi": {"ssid": "Home", "signal": 82, "rate": 1201000, "phy": 10, "band": 5},
   "vpn": {"name": "Office", "description": "WireGuard Tunnel", "ipv4": "10.8.0.2/24"},
   "ping": 3,
+  "host_ping": 14,
   "totals": [4213000000, 612000000],
   "traffic": [
     [120000, 31000], [95000, 22000], [140000, 40000], [310000, 52000], [860000, 88000],

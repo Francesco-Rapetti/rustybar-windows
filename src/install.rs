@@ -3,7 +3,8 @@
 //! the installed bar first, so it also updates it), writes the example config to
 //! `%APPDATA%\rustybar` if there's none, starts the bar with Windows (the `Run` key: Settings >
 //! Apps > Startup shows it, with its switch), lists it in Settings > Apps (whose Uninstall runs
-//! `rustybar uninstall`), adds a Start menu shortcut, and starts it. Uninstall undoes all of it
+//! `rustybar uninstall`), adds Start menu shortcuts (the bar, and its settings window: `rustybar
+//! settings`), and starts it. Uninstall undoes all of it
 //! and leaves the config and the logs.
 //!
 //! The work is always done by a second run started by File Explorer, as the bar is at sign-in: a
@@ -167,11 +168,20 @@ fn installed_exe() -> PathBuf {
 
 /// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\RustyBar.lnk`.
 fn shortcut() -> Option<PathBuf> {
+    start_menu().map(|dir| dir.join(format!("{NAME}.lnk")))
+}
+
+/// The shortcuts to the settings window, in Italian and in English: the one of the language at
+/// install time is made, both go at uninstall.
+const SETTINGS_LINKS: [&str; 2] = ["Impostazioni di RustyBar.lnk", "RustyBar Settings.lnk"];
+
+/// `%APPDATA%\Microsoft\Windows\Start Menu\Programs`.
+fn start_menu() -> Option<PathBuf> {
     unsafe {
         let path = SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_DEFAULT, None).ok()?;
         let s = path.to_string().ok();
         CoTaskMemFree(Some(path.0 as *const _));
-        s.map(|s| PathBuf::from(s).join(format!("{NAME}.lnk")))
+        s.map(PathBuf::from)
     }
 }
 
@@ -183,9 +193,13 @@ fn install() -> i32 {
     clean_parked();
     let dir = install_dir();
     let exe = installed_exe();
-    // The installed bar goes first: its file can't be replaced while it runs
+    // The installed bar goes first: its file can't be replaced while it runs; so does an open
+    // settings window, which runs the same file
     if process::quit(&config::default_dir(), 5000) {
         say!("{}", t("La barra installata è stata chiusa", "The installed bar was closed"));
+    }
+    if close_settings() {
+        say!("{}", t("La finestra delle impostazioni è stata chiusa", "The settings window was closed"));
     }
     if !same_file(&source, &exe) {
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -219,6 +233,12 @@ fn install() -> i32 {
         Some(link) => say!("{} {}", t("Collegamento nel menu Start:", "Start menu shortcut:"), link.display()),
         None => say!("{}", t("Non riesco a creare il collegamento nel menu Start", "Can't make the Start menu shortcut")),
     }
+    let settings = start_menu().map(|dir| dir.join(SETTINGS_LINKS[if crate::i18n::italian() { 0 } else { 1 }]));
+    let description = t("Le impostazioni della barra", "The settings of the bar");
+    match settings.filter(|link| write_link(link, &exe, "settings", &dir, description)) {
+        Some(link) => say!("{} {}", t("Collegamento alle impostazioni:", "Settings shortcut:"), link.display()),
+        None => say!("{}", t("Non riesco a creare il collegamento alle impostazioni", "Can't make the settings shortcut")),
+    }
 
     match start(&exe) {
         Ok(()) => say!("{}", t("Barra avviata", "Bar started")),
@@ -234,6 +254,9 @@ fn uninstall() -> i32 {
     if process::quit(&config::default_dir(), 5000) {
         say!("{}", t("La barra è stata chiusa", "The bar was closed"));
     }
+    if close_settings() {
+        say!("{}", t("La finestra delle impostazioni è stata chiusa", "The settings window was closed"));
+    }
     unsafe {
         let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, &HSTRING::from(NAME));
         let _ = RegDeleteTreeW(HKEY_CURRENT_USER, UNINSTALL);
@@ -243,6 +266,11 @@ fn uninstall() -> i32 {
         && std::fs::remove_file(&link).is_ok()
     {
         say!("{}", t("Collegamento nel menu Start tolto", "Start menu shortcut removed"));
+    }
+    for name in SETTINGS_LINKS {
+        if let Some(link) = start_menu().map(|dir| dir.join(name)) {
+            let _ = std::fs::remove_file(link);
+        }
     }
     // Run from the installed copy (Settings' Uninstall does that), the file is in use: a running
     // executable can't be deleted but can be moved, out of the folder, to the temporary files
@@ -260,6 +288,27 @@ fn uninstall() -> i32 {
     }
     say!("{} {}", t("Config e log restano in", "The config and the logs stay in"), config::default_dir().display());
     0
+}
+
+/// Closes every settings window (`rustybar settings`), as its close button would (a text being
+/// typed is kept), and waits up to 5 s for them to go. True if there was one.
+fn close_settings() -> bool {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    let class = w!("RustyBarSettings");
+    let mut found = false;
+    let start = std::time::Instant::now();
+    while let Ok(hwnd) = unsafe { FindWindowW(class, PCWSTR::null()) } {
+        found = true;
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+        if start.elapsed().as_secs() >= 5 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    found
 }
 
 /// Deletes the copies an uninstall moved to the temporary files, once nothing runs them.

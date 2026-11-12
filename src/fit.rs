@@ -56,6 +56,8 @@ pub struct Fitted {
     /// What `fit` returned, for the next one.
     pub levels: Vec<usize>,
     pub center_compact: bool,
+    /// The center group in its wide form (see `Widget::wide`).
+    pub center_wide: bool,
     /// The widgets drawn compact, and those in each side's `⋯` popup (left, right).
     pub compact: Vec<String>,
     pub hidden: [Vec<String>; 2],

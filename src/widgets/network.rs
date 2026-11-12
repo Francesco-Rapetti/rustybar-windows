@@ -27,7 +27,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -53,6 +53,7 @@ use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, Glo
 use windows::core::{GUID, HSTRING, PCWSTR};
 
 use super::{Input, Reply, Signal};
+use crate::config::Options;
 use crate::i18n::{number, size, t};
 use crate::json::Json;
 use crate::log;
@@ -424,6 +425,8 @@ struct Open {
     totals: (u64, u64),
     ticks: u32,
     ping: Option<u32>,
+    /// The round trip to `ping`, the host of the options.
+    host_ping: Option<u32>,
     nearby: Option<Result<Vec<Nearby>, u32>>,
     scanning: bool,
     /// The detail just copied, and when.
@@ -441,6 +444,12 @@ pub struct Network {
     wifi: Option<WifiLink>,
     timer: Timer,
     ping: Option<Ping>,
+    /// `ping`: a host on the Internet to ping too while the popup is open (off by default: the
+    /// widget asks nothing outside the local network otherwise), its address once resolved, and
+    /// its ping.
+    host: Option<String>,
+    host_address: Arc<Mutex<Option<Ipv4Addr>>>,
+    host_ping: Option<Ping>,
     shown: bool,
     open: Option<Open>,
     mock: Option<Mock>,
@@ -451,14 +460,15 @@ struct Mock {
     history: VecDeque<(f64, f64)>,
     totals: (u64, u64),
     ping: Option<u32>,
+    host_ping: Option<u32>,
     nearby: Option<Vec<Nearby>>,
 }
 
 impl Network {
-    pub fn new() -> Network {
+    pub fn new(options: &Options) -> Network {
         let shared = Arc::new(Shared { wake: Wake::new(), changed: AtomicBool::new(false), wifi: AtomicBool::new(false), scanned: AtomicBool::new(false) });
         if let Some(m) = crate::mock::load("network") {
-            return Network::mock(shared, &m);
+            return Network::mock(shared, &m, options);
         }
         let mut n = Network {
             shared,
@@ -470,6 +480,9 @@ impl Network {
             wifi: None,
             timer: Timer::new(),
             ping: None,
+            host: options.str("ping").map(str::trim).filter(|h| !h.is_empty()).map(str::to_string),
+            host_address: Arc::new(Mutex::new(None)),
+            host_ping: None,
             shown: true,
             open: None,
             mock: None,
@@ -480,7 +493,7 @@ impl Network {
 
     /// The widget with the made-up connection of `network.json`: nothing of Windows is asked or
     /// watched, and no timer runs.
-    fn mock(shared: Arc<Shared>, m: &Json) -> Network {
+    fn mock(shared: Arc<Shared>, m: &Json, options: &Options) -> Network {
         let ip = |v: &Json| v.str().and_then(|s| s.parse::<IpAddr>().ok());
         let band = |v: &Json| match v.f64() {
             Some(ghz) if ghz < 3.0 => Some(two_four()),
@@ -553,12 +566,16 @@ impl Network {
             wifi,
             timer: Timer::new(),
             ping: None,
+            host: options.str("ping").map(str::trim).filter(|h| !h.is_empty()).map(str::to_string),
+            host_address: Arc::new(Mutex::new(None)),
+            host_ping: None,
             shown: true,
             open: None,
             mock: Some(Mock {
                 history: m["traffic"].array().iter().map(pair).collect(),
                 totals: (totals.0 as u64, totals.1 as u64),
                 ping: m["ping"].f64().map(|p| p as u32),
+                host_ping: m["host_ping"].f64().map(|p| p as u32),
                 nearby,
             }),
         }
@@ -658,6 +675,34 @@ impl Network {
         }
     }
 
+    /// The address of `ping`'s host: at once for an IPv4 address, else on a thread of its own (a
+    /// name can take a while to resolve), once; it stays for the next popups.
+    fn resolve_host(&self) {
+        let Some(host) = self.host.clone() else { return };
+        let mut address = self.host_address.lock().unwrap_or_else(|e| e.into_inner());
+        if address.is_some() {
+            return;
+        }
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            *address = Some(ip);
+            return;
+        }
+        let slot = self.host_address.clone();
+        std::thread::spawn(move || {
+            use std::net::ToSocketAddrs;
+            let found = (host.as_str(), 0).to_socket_addrs().ok().and_then(|mut all| {
+                all.find_map(|a| match a.ip() {
+                    IpAddr::V4(v4) => Some(v4),
+                    IpAddr::V6(_) => None,
+                })
+            });
+            if found.is_none() {
+                log!("network: no IPv4 address for {host}");
+            }
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = found;
+        });
+    }
+
     /// The popup's second: counters, a ping now and then, the copied note going away.
     fn tick(&mut self) {
         let luid = self.adapter.as_ref().map(|a| a.luid);
@@ -680,6 +725,13 @@ impl Network {
             }
             open.last = Some((down, up, now));
             open.totals = (down, up);
+        }
+        let host = *self.host_address.lock().unwrap_or_else(|e| e.into_inner());
+        // The host's first ping as soon as its address is known, then every 5 seconds
+        if let (Some(h), Some(p)) = (host, &mut self.host_ping)
+            && (open.ticks.is_multiple_of(PING_EVERY) || p.sent.is_none())
+        {
+            p.send(h);
         }
         if open.ticks.is_multiple_of(PING_EVERY)
             && let (Some(g), Some(p)) = (gateway, &mut self.ping)
@@ -725,28 +777,39 @@ impl super::Widget for Network {
         Some(Pill::new(items).gap(8.0))
     }
 
+    /// The callbacks' event, then while the popup is open the timer and the pings on their way.
     fn handles(&self) -> Vec<HANDLE> {
         let mut handles: Vec<HANDLE> = self.shared.wake.handle().into_iter().collect();
-        // The positions matter: 1 the timer, 2 the ping
         if let Some(t) = self.timer.handle() {
             handles.push(t);
-            if let Some(p) = self.ping.as_ref().filter(|p| p.pending).and_then(|p| p.done.handle()) {
-                handles.push(p);
+            for ping in [&self.ping, &self.host_ping] {
+                if let Some(p) = ping.as_ref().filter(|p| p.pending).and_then(|p| p.done.handle()) {
+                    handles.push(p);
+                }
             }
         }
         handles
     }
 
     fn signaled_at(&mut self, index: usize) -> bool {
-        match index {
-            1 => {
+        let Some(handle) = self.handles().get(index).copied() else { return false };
+        let done = |p: &Option<Ping>| p.as_ref().and_then(|p| p.done.handle());
+        match Some(handle) {
+            h if h == self.timer.handle() => {
                 self.tick();
                 true
             }
-            2 => {
+            h if h == done(&self.ping) => {
                 let rtt = self.ping.as_mut().and_then(Ping::reply);
                 if let Some(open) = &mut self.open {
                     open.ping = rtt;
+                }
+                self.open.is_some()
+            }
+            h if h == done(&self.host_ping) => {
+                let rtt = self.host_ping.as_mut().and_then(Ping::reply);
+                if let Some(open) = &mut self.open {
+                    open.host_ping = rtt;
                 }
                 self.open.is_some()
             }
@@ -799,6 +862,7 @@ impl super::Widget for Network {
                 totals: m.totals,
                 ticks: 0,
                 ping: m.ping,
+                host_ping: m.host_ping,
                 nearby: m.nearby.clone().map(Ok),
                 scanning: false,
                 copied: None,
@@ -818,10 +882,15 @@ impl super::Widget for Network {
                 totals: (0, 0),
                 ticks: 0,
                 ping: None,
+                host_ping: None,
                 nearby,
                 scanning,
                 copied: None,
             });
+            if self.host.is_some() && self.host_ping.is_none() {
+                self.host_ping = Ping::new();
+            }
+            self.resolve_host();
             if self.ping.is_none() {
                 self.ping = Ping::new();
             }
@@ -1066,9 +1135,12 @@ impl Network {
         if let Some((ip, prefix)) = a.ipv4 {
             rows.push(("ip", t("IP locale", "Local IP"), format!("{ip}/{prefix}"), None));
         }
+        let ms = |ping: Option<u32>| ping.map(|ms| if ms == 0 { "< 1 ms".to_string() } else { format!("{ms} ms") });
         if let Some(g) = a.gateway {
-            let ping = open.ping.map(|ms| if ms == 0 { "< 1 ms".to_string() } else { format!("{ms} ms") });
-            rows.push(("router", "Router", g.to_string(), ping));
+            rows.push(("router", "Router", g.to_string(), ms(open.ping)));
+        }
+        if let Some(host) = &self.host {
+            rows.push(("host", "Ping", host.clone(), ms(open.host_ping)));
         }
         if !a.dns.is_empty() {
             rows.push(("dns", "DNS", a.dns.iter().take(2).map(|d| d.to_string()).collect::<Vec<_>>().join(", "), None));

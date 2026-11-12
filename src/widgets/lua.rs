@@ -113,6 +113,8 @@ pub struct LuaWidget {
     item_actions: RefCell<Vec<Option<Action>>>,
     popup_actions: RefCell<Vec<Action>>,
     sliders: RefCell<Vec<Function>>,
+    /// The toggles of the open popup: their `on_change`, and the value a click gives.
+    toggles: RefCell<Vec<(Function, bool)>>,
     /// A slider being dragged: its index and where the mouse is along it.
     sliding: Option<(usize, f32)>,
     /// The pictures of the open popup, decoded once, by file and size in pixels.
@@ -141,6 +143,7 @@ impl LuaWidget {
             item_actions: RefCell::new(Vec::new()),
             popup_actions: RefCell::new(Vec::new()),
             sliders: RefCell::new(Vec::new()),
+            toggles: RefCell::new(Vec::new()),
             sliding: None,
             images: RefCell::new(HashMap::new()),
         };
@@ -312,13 +315,14 @@ impl LuaWidget {
     fn layout(&self, theme: &Theme, fonts: &Fonts, root: &Table) -> Scene {
         let width = num(root, "width").unwrap_or(WIDTH).clamp(200.0, 640.0);
         let sliding = self.sliding;
-        let mut lay = Lay { w: self, theme, fonts, actions: Vec::new(), sliders: Vec::new(), sliding };
+        let mut lay = Lay { w: self, theme, fonts, actions: Vec::new(), sliders: Vec::new(), toggles: Vec::new(), sliding };
         let mut scene = Scene::new(width, 0.0);
         let h = lay.column(&mut scene, root, MARGIN, MARGIN, width - 2.0 * MARGIN, PAD);
         scene.height = (h + 2.0 * MARGIN).ceil();
-        let Lay { actions, sliders, .. } = lay;
+        let Lay { actions, sliders, toggles, .. } = lay;
         *self.popup_actions.borrow_mut() = actions;
         *self.sliders.borrow_mut() = sliders;
+        *self.toggles.borrow_mut() = toggles;
         scene
     }
 
@@ -473,6 +477,7 @@ struct Lay<'a> {
     fonts: &'a Fonts,
     actions: Vec<Action>,
     sliders: Vec<Function>,
+    toggles: Vec<(Function, bool)>,
     sliding: Option<(usize, f32)>,
 }
 
@@ -638,6 +643,31 @@ impl Lay<'_> {
                     scene.slider(Rect::new(track.x - 8.0, track.y, track.w + 16.0, track.h), format!("s:{index}"));
                 }
                 SLIDER_H
+            }
+            // A label and a switch as Windows 11 draws it; a click on the row calls `on_change(on)`
+            "toggle" => {
+                let on = flag(&t, "on");
+                let h = num(&t, "height").unwrap_or(ROW_H).clamp(24.0, 80.0);
+                let switch = Rect::new(ix + iw - 40.0, y + (h - 20.0) / 2.0, 40.0, 20.0);
+                let label = t.get::<Value>(1).ok().filter(|v| !v.is_nil());
+                if let Some(label) = &label {
+                    let (text, look) = self.look(label, theme.text, false);
+                    scene.text(Rect::new(ix, y, iw - 52.0, h), text, look.font, look.color, Align::Start);
+                }
+                let color = self.color(&t, "color", theme.primary);
+                if on {
+                    scene.fill(switch, 10.0, color);
+                    scene.fill(Rect::new(switch.x + 24.0, switch.y + 4.0, 12.0, 12.0), 6.0, theme.on_primary);
+                } else {
+                    scene.fill(switch, 10.0, theme.subtext);
+                    scene.fill(Rect::new(switch.x + 1.0, switch.y + 1.0, 38.0, 18.0), 9.0, theme.base);
+                    scene.fill(Rect::new(switch.x + 5.0, switch.y + 5.0, 10.0, 10.0), 5.0, theme.subtext);
+                }
+                if let Ok(Value::Function(f)) = t.get::<Value>("on_change") {
+                    self.toggles.push((f, !on));
+                    scene.zone(Rect::new(x, y, w, h), theme.row_radius, format!("t:{}", self.toggles.len() - 1));
+                }
+                h
             }
             "progress" => {
                 let value = num(&t, "value").unwrap_or(0.0).clamp(0.0, 1.0);
@@ -813,6 +843,7 @@ impl super::Widget for LuaWidget {
                 heard || updated
             }
             Signal::TimeChanged => self.deliver("time", Vec::new()),
+            Signal::DevicesChanged | Signal::Displays => false,
             Signal::Foreground(front) => {
                 if !self.on.iter().any(|o| o == "foreground") {
                     return false;
@@ -866,6 +897,7 @@ impl super::Widget for LuaWidget {
         if !open {
             self.popup_actions.borrow_mut().clear();
             self.sliders.borrow_mut().clear();
+            self.toggles.borrow_mut().clear();
             self.images.borrow_mut().clear();
             self.sliding = None;
             if let Some(host) = &self.host {
@@ -895,6 +927,14 @@ impl super::Widget for LuaWidget {
             if w.host.as_ref().is_some_and(Host::take_close) { Reply::Close } else { Reply::Redraw }
         };
         match input {
+            Input::Action(a) if a.starts_with("t:") => {
+                let toggle = a[2..].parse::<usize>().ok().and_then(|i| self.toggles.borrow().get(i).cloned());
+                let Some((f, value)) = toggle else { return Reply::Nothing };
+                if let Err(e) = self.call_fn(&f, std::iter::once(Value::Boolean(value)).collect()) {
+                    self.fail(&format!("on_change: {e}"));
+                }
+                close(self)
+            }
             Input::Action(a) => {
                 let Some(action) = a.strip_prefix("a:").and_then(|i| i.parse::<usize>().ok()).and_then(|i| self.popup_actions.borrow().get(i).cloned()) else {
                     return Reply::Nothing;
@@ -1025,6 +1065,51 @@ mod tests {
         w.event(&Signal::Game(false));
         w.event(&Signal::Shown(false));
         assert!(w.timer.handle().is_none());
+    }
+
+    #[test]
+    fn toggles_and_disclosures() {
+        let mut w = widget(
+            "toggle",
+            r#"rb.widget { name = "x", on = false, open = false,
+                 bar = function() return "x" end,
+                 popup = function(self)
+                   return rb.ui.column {
+                     rb.ui.toggle { "Lamp", on = self.on, on_change = function(v) self.on = v end },
+                     rb.ui.disclosure { "More", open = self.open, on_click = function() self.open = not self.open end,
+                       rb.ui.text { "Inside" } },
+                   }
+                 end }"#,
+            "x",
+            "",
+        );
+        let t = theme();
+        let fonts = Fonts::new(&t).unwrap();
+        w.popup_shown(true);
+        let closed = w.popup(&t, &fonts).unwrap();
+        let actions: Vec<&str> = closed.zones.iter().map(|z| z.action.as_str()).collect();
+        assert_eq!(actions, ["t:0", "a:0"]);
+        // A click on the toggle gives on_change the other value; on the title, the section opens
+        assert_eq!(w.popup_input(&Input::Action("t:0")), Reply::Redraw);
+        assert!(w.this.as_ref().unwrap().get::<bool>("on").unwrap());
+        assert_eq!(w.popup_input(&Input::Action("a:0")), Reply::Redraw);
+        let open = w.popup(&t, &fonts).unwrap();
+        assert!(open.height > closed.height);
+        assert_eq!(w.popup_input(&Input::Action("t:0")), Reply::Redraw);
+        assert!(!w.this.as_ref().unwrap().get::<bool>("on").unwrap());
+    }
+
+    #[test]
+    fn home_assistant_without_the_home_widget() {
+        let w = widget(
+            "home",
+            r#"rb.widget { name = "x",
+                 bar = function() return tostring(rb.home.online()) .. " " .. tostring(rb.home.state("light.a")) .. " " .. tostring(rb.home.call("light", "toggle", { entity_id = "light.a" })) end }"#,
+            "x",
+            "",
+        );
+        let p = w.pill(&theme()).unwrap();
+        assert_eq!(p.items[0].text, "false nil false");
     }
 
     #[test]

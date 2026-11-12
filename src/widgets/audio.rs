@@ -42,6 +42,9 @@ use windows::Win32::System::Variant::VT_UI4;
 use windows::core::{GUID, HSTRING, PCWSTR, implement};
 
 use super::{Input, Reply, Signal};
+use super::mixer::{self, Mixer};
+use super::privacy::Privacy;
+use crate::config::Options;
 use crate::log;
 use crate::process;
 use crate::theme::{Rgba, Theme};
@@ -57,7 +60,7 @@ const BATTERY_EVERY: i32 = 5 * 60 * 1000;
 const CONTEXT: GUID = GUID::from_u128(0x5d1f0f3c_6a64_4f8e_9a37_52b7c3a1e7a1);
 
 /// The battery level Windows shows for a Bluetooth device, on its Bluetooth device node.
-const BATTERY: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5), pid: 2 };
+pub(super) const BATTERY: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5), pid: 2 };
 
 /// The enumerators of Bluetooth device nodes: classic, hands-free, Low Energy.
 const BLUETOOTH: [&str; 4] = ["BTHENUM", "BTHHFENUM", "BTHLE", "BTHLEDEVICE"];
@@ -71,6 +74,7 @@ const MONITOR: &str = "\u{E7F4}";
 const SPEAKERS: &str = "\u{E7F5}";
 const MICROPHONE: &str = "\u{E720}";
 const MICROPHONE_OFF: &str = "\u{EC54}";
+const CAMERA: &str = "\u{E714}";
 
 // The popup's layout, in DIPs.
 const MARGIN: f32 = 8.0;
@@ -83,6 +87,9 @@ const TILE_H: f32 = 76.0;
 const HEADER: f32 = 26.0;
 const ROW: f32 = 32.0;
 const BUTTON: f32 = 30.0;
+/// A row of the mixer, and the line that says which apps use the microphone or the camera.
+const APP_ROW: f32 = 36.0;
+const NOTE: f32 = 24.0;
 
 /// The interface behind Windows' sound settings, with Windows' names: only `SetDefaultEndpoint`
 /// is called, the others keep the order of the slots.
@@ -276,14 +283,22 @@ pub struct Audio {
     game: bool,
     /// While the popup is open: the devices to switch to.
     lists: Option<(Vec<Device>, Vec<Device>)>,
+    /// Which apps use the microphone or the camera (`privacy`), watched while a bar shows.
+    privacy_on: bool,
+    privacy: Option<Privacy>,
+    /// The volume mixer in the popup (`mixer`), while it's open.
+    mixer_on: bool,
+    mixer: Option<Mixer>,
     /// With made-up data (see `mock`), the devices of `audio.json`; nothing of Core Audio is used.
     mock: Option<(Vec<Device>, Vec<Device>)>,
+    /// The made-up mixer's apps: name, volume, muted, playing.
+    mock_apps: Vec<(String, f32, bool, bool)>,
 }
 
 impl Audio {
-    pub fn new() -> Audio {
+    pub fn new(options: &Options) -> Audio {
         if let Some(m) = crate::mock::load("audio") {
-            return Audio::mock(&m);
+            return Audio::mock(&m, options);
         }
         let enumerator: Option<IMMDeviceEnumerator> = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
             .map_err(|e| log!("audio: no Core Audio ({e})"))
@@ -299,7 +314,12 @@ impl Audio {
             shown: true,
             game: false,
             lists: None,
+            privacy_on: options.bool("privacy").unwrap_or(true),
+            privacy: None,
+            mixer_on: options.bool("mixer").unwrap_or(true),
+            mixer: None,
             mock: None,
+            mock_apps: Vec::new(),
         };
         a.attach();
         a
@@ -308,7 +328,7 @@ impl Audio {
     /// The widget with the made-up devices of `audio.json`: `outputs` and `inputs` (`name`,
     /// `form` as `EndpointFormFactor`, `bluetooth`, `battery`, `default`), `output_volume` and
     /// `input_volume` in percent, `output_muted` and `input_muted`.
-    fn mock(m: &Json) -> Audio {
+    fn mock(m: &Json, options: &Options) -> Audio {
         let mut endpoints = [None, None];
         let mut lists = [Vec::new(), Vec::new()];
         for (i, (key, prefix)) in [("outputs", "out"), ("inputs", "in")].into_iter().enumerate() {
@@ -342,7 +362,16 @@ impl Audio {
             shown: true,
             game: false,
             lists: None,
+            privacy_on: options.bool("privacy").unwrap_or(true),
+            privacy: options.bool("privacy").unwrap_or(true).then(|| Privacy::mock(strings(&m["microphone_in_use"]), strings(&m["camera_in_use"]))),
+            mixer_on: options.bool("mixer").unwrap_or(true),
+            mixer: None,
             mock: Some((outputs, inputs)),
+            mock_apps: m["apps"]
+                .array()
+                .iter()
+                .map(|a| (a["name"].str().unwrap_or_default().to_string(), a["volume"].f64().unwrap_or(100.0) as f32 / 100.0, a["muted"].bool().unwrap_or(false), a["active"].bool().unwrap_or(false)))
+                .collect(),
         }
     }
 
@@ -356,6 +385,9 @@ impl Audio {
                 Err(e) => log!("audio: can't watch the devices ({e})"),
             }
         }
+        if self.privacy_on && self.privacy.is_none() {
+            self.privacy = Some(Privacy::new());
+        }
         self.defaults();
         self.schedule();
     }
@@ -367,6 +399,8 @@ impl Audio {
                 let _ = enumerator.UnregisterEndpointNotificationCallback(&client);
             }
         }
+        self.privacy = None;
+        self.mixer = None;
         self.output = None;
         self.input = None;
         self.battery_timer.stop();
@@ -393,6 +427,9 @@ impl Audio {
             *slot = device.as_ref().and_then(|d| Endpoint::open(d, &self.wake));
             changed = true;
         }
+        if changed && self.mixer.is_some() {
+            self.open_mixer();
+        }
         if changed && self.lists.is_some() {
             self.lists = Some(self.list_devices());
         }
@@ -418,6 +455,33 @@ impl Audio {
             self.battery_timer.start(BATTERY_EVERY as i64, BATTERY_EVERY);
         } else {
             self.battery_timer.stop();
+        }
+    }
+
+    /// The mixer of the default output, for the open popup.
+    fn open_mixer(&mut self) {
+        if self.mock.is_some() {
+            let apps = self.mock_apps.iter().map(|(name, level, muted, active)| mixer::App::mock(name, *level, *muted, *active)).collect();
+            self.mixer = Some(Mixer::mock(apps, &self.wake));
+            return;
+        }
+        let device = self.enumerator.as_ref().and_then(|e| unsafe { e.GetDefaultAudioEndpoint(eRender, eConsole) }.ok());
+        // The old one first: its callbacks go before the new one's come
+        self.mixer = None;
+        self.mixer = device.map(|d| Mixer::open(&d, &self.wake));
+    }
+
+    /// The microphone and the camera: in use by some app, or the microphone muted.
+    fn privacy_items(&self, theme: &Theme, items: &mut Vec<Item>) {
+        let using = |i: usize| self.privacy.as_ref().is_some_and(|p| !p.using[i].is_empty());
+        let red = theme.color("red").unwrap_or(theme.text);
+        match &self.input {
+            Some(input) if input.muted => items.push(Item::icon(MICROPHONE_OFF, red).space(10.0)),
+            _ if using(0) => items.push(Item::icon(MICROPHONE, theme.primary).space(10.0)),
+            _ => {}
+        }
+        if using(1) {
+            items.push(Item::icon(CAMERA, theme.primary).space(8.0));
         }
     }
 
@@ -456,31 +520,39 @@ impl super::Widget for Audio {
             items.push(Item::icon(battery_icon(b), battery_color(theme, b, theme.subtext)).space(10.0));
             items.push(Item::text(format!("{b}%"), battery_color(theme, b, theme.subtext)).small().space(2.0));
         }
+        self.privacy_items(theme, &mut items);
         Some(Pill::new(items).gap(6.0))
     }
 
-    /// The icons alone: the output's, and its battery's.
+    /// The icons alone: the output's, its battery's, the microphone and the camera.
     fn compact(&self, theme: &Theme) -> Option<Pill> {
         let out = self.output.as_ref()?;
         let mut items = vec![Item::icon(output_icon(out), if out.muted { theme.subtext } else { theme.text })];
         if let Some(b) = out.battery {
             items.push(Item::icon(battery_icon(b), battery_color(theme, b, theme.subtext)));
         }
+        self.privacy_items(theme, &mut items);
         Some(Pill::new(items).gap(8.0))
     }
 
+    /// The event of Core Audio's callbacks, the battery's timer, and the registry watches of the
+    /// microphone and the camera.
     fn handles(&self) -> Vec<HANDLE> {
-        self.wake.handle().into_iter().chain(self.battery_timer.handle()).collect()
+        let privacy = self.privacy.as_ref().map(Privacy::handles).unwrap_or_default();
+        self.wake.handle().into_iter().chain(self.battery_timer.handle()).chain(privacy).collect()
     }
 
     fn signaled_at(&mut self, index: usize) -> bool {
-        if index == 1 {
-            // The battery timer
+        let Some(handle) = self.handles().get(index).copied() else { return false };
+        if Some(handle) == self.battery_timer.handle() {
             let mut changed = false;
             for e in [&mut self.output, &mut self.input].into_iter().flatten() {
                 changed |= e.read_battery();
             }
             return changed;
+        }
+        if Some(handle) != self.wake.handle() {
+            return self.privacy.as_mut().is_some_and(|p| p.signaled(handle));
         }
         let mut changed = false;
         if self.changed.swap(false, Ordering::AcqRel) {
@@ -494,6 +566,9 @@ impl super::Widget for Audio {
         }
         for e in [&mut self.output, &mut self.input].into_iter().flatten() {
             changed |= e.read();
+        }
+        if let Some(mixer) = &mut self.mixer {
+            changed |= mixer.update();
         }
         changed
     }
@@ -536,6 +611,11 @@ impl super::Widget for Audio {
     fn popup_shown(&mut self, open: bool) {
         if let Some(lists) = &self.mock {
             self.lists = open.then(|| lists.clone());
+            if open && self.mixer_on {
+                self.open_mixer();
+            } else {
+                self.mixer = None;
+            }
             return;
         }
         if open {
@@ -544,16 +624,35 @@ impl super::Widget for Audio {
                 e.read();
                 e.read_battery();
             }
+            if self.mixer_on {
+                self.open_mixer();
+            }
         } else {
             self.lists = None;
+            self.mixer = None;
         }
     }
 
     fn popup(&self, theme: &Theme, fonts: &Fonts) -> Option<Scene> {
         let (outputs, inputs) = self.lists.as_ref()?;
+        // Which apps use the microphone and the camera, and the mixer's apps
+        let notes: Vec<(&str, String)> = self
+            .privacy
+            .iter()
+            .flat_map(|p| {
+                [(MICROPHONE, t("Microfono in uso da", "Microphone in use by"), &p.using[0]), (CAMERA, t("Fotocamera in uso da", "Camera in use by"), &p.using[1])]
+                    .into_iter()
+                    .filter(|(_, _, apps)| !apps.is_empty())
+                    .map(|(icon, label, apps)| (icon, format!("{label} {}", apps.join(", "))))
+            })
+            .collect();
+        let apps = self.mixer.as_ref().map_or(&[][..], |m| m.apps.as_slice());
+        let mixer_h = if apps.is_empty() { 0.0 } else { HEADER + apps.len() as f32 * APP_ROW };
         let buttons = [("settings", t("Impostazioni audio", "Sound settings")), ("mixer", t("Mixer volume", "Volume mixer"))];
         let height = MARGIN
             + 2.0 * (TILE_H + GAP)
+            + notes.len() as f32 * NOTE
+            + mixer_h
             + 2.0 * HEADER
             + (outputs.len().max(1) + inputs.len().max(1)) as f32 * ROW
             + GAP
@@ -565,6 +664,20 @@ impl super::Widget for Audio {
         y += TILE_H + GAP;
         volume_tile(&mut scene, theme, fonts, y, self.input.as_ref(), false);
         y += TILE_H + GAP;
+        for (icon, text) in &notes {
+            let small = Font::new(theme.small_size, Weight::Medium);
+            scene.text(Rect::new(MARGIN + PAD, y, 16.0, NOTE), *icon, Font::icons(12.0), theme.primary, Align::Center);
+            scene.text(Rect::new(MARGIN + PAD + 22.0, y, INNER - 2.0 * PAD - 22.0, NOTE), text.as_str(), small, theme.subtext, Align::Start);
+            y += NOTE;
+        }
+        if !apps.is_empty() {
+            scene.text(Rect::new(MARGIN + PAD, y, INNER - 2.0 * PAD, HEADER), t("App", "Apps"), Font::new(theme.small_size, Weight::SemiBold), theme.subtext, Align::Start);
+            y += HEADER;
+            for (i, app) in apps.iter().enumerate() {
+                app_row(&mut scene, theme, fonts, y, i, app);
+                y += APP_ROW;
+            }
+        }
         for (outputs_list, devices) in [(true, outputs), (false, inputs)] {
             let label = if outputs_list { t("Uscita", "Output") } else { t("Ingresso", "Input") };
             scene.text(Rect::new(MARGIN + PAD, y, INNER - 2.0 * PAD, HEADER), label, Font::new(theme.small_size, Weight::SemiBold), theme.subtext, Align::Start);
@@ -596,6 +709,25 @@ impl super::Widget for Audio {
     }
 
     fn popup_input(&mut self, input: &Input) -> Reply {
+        // The mixer's apps (a made-up one has no session: only its numbers move)
+        let app = |action: &str, prefix: &str| action.strip_prefix(prefix).and_then(|i| i.parse::<usize>().ok());
+        if let Some(mixer) = &mut self.mixer {
+            match input {
+                Input::Slide(action, fraction) if let Some(i) = app(action, "app-volume:") => {
+                    if let Some(a) = mixer.apps.get_mut(i) {
+                        a.set_level((fraction * 100.0).round() / 100.0);
+                    }
+                    return Reply::Redraw;
+                }
+                Input::Action(action) if let Some(i) = app(action, "app-mute:") => {
+                    if let Some(a) = mixer.apps.get_mut(i) {
+                        a.toggle_mute();
+                    }
+                    return Reply::Redraw;
+                }
+                _ => {}
+            }
+        }
         if self.mock.is_some() {
             return self.mock_input(input);
         }
@@ -702,6 +834,32 @@ fn volume_tile(scene: &mut Scene, theme: &Theme, fonts: &Fonts, y: f32, endpoint
     scene.slider(Rect::new(track.x - 8.0, track.y, track.w + 16.0, track.h), format!("{prefix}-volume"));
 }
 
+/// The texts of a JSON array (made-up data).
+fn strings(v: &Json) -> Vec<String> {
+    v.array().iter().filter_map(|s| s.str().map(str::to_string)).collect()
+}
+
+/// An app of the mixer: its speaker (a click mutes), its name (dimmer while it plays nothing), a
+/// slider and the percentage.
+fn app_row(scene: &mut Scene, theme: &Theme, fonts: &Fonts, y: f32, i: usize, app: &mixer::App) {
+    let percent = (app.level * 100.0).round() as u32;
+    let color = if app.muted { theme.subtext } else { theme.text };
+    let button = Rect::new(MARGIN + 6.0, y + (APP_ROW - 28.0) / 2.0, 28.0, 28.0);
+    scene.text(button, speaker(percent, app.muted), Font::icons(14.0), color, Align::Center);
+    scene.zone(button, theme.row_radius, format!("app-mute:{i}"));
+    let name_x = button.x + button.w + 6.0;
+    let name_w = 104.0;
+    let name_color = if app.active && !app.muted { theme.text } else { theme.subtext };
+    scene.text(Rect::new(name_x, y, name_w, APP_ROW), app.name.as_str(), Font::new(theme.font_size, Weight::Regular), name_color, Align::Start);
+    let small = Font::new(theme.small_size, Weight::Medium);
+    let percent_w = fonts.width("100%", small).ceil();
+    scene.text(Rect::new(MARGIN + INNER - PAD - percent_w, y, percent_w, APP_ROW), format!("{percent}%"), small, color, Align::End);
+    let track_x = name_x + name_w + 12.0;
+    let track = Rect::new(track_x, y + (APP_ROW - 22.0) / 2.0, MARGIN + INNER - PAD - percent_w - 14.0 - track_x, 22.0);
+    slider(scene, theme, track, app.level, !app.muted);
+    scene.slider(Rect::new(track.x - 8.0, track.y, track.w + 16.0, track.h), format!("app-volume:{i}"));
+}
+
 /// A slider as Windows 11 draws it: a thin track, filled up to the knob in the primary color, and
 /// a round knob with a dot of the primary color in it.
 pub fn slider(scene: &mut Scene, theme: &Theme, r: Rect, value: f32, active: bool) {
@@ -780,14 +938,14 @@ fn kind_icon(form: u32) -> &'static str {
 }
 
 /// Segoe Fluent Icons' batteries: a tenth each, from empty to full.
-fn battery_icon(level: u8) -> &'static str {
+pub(super) fn battery_icon(level: u8) -> &'static str {
     const LEVELS: [&str; 11] =
         ["\u{E850}", "\u{E851}", "\u{E852}", "\u{E853}", "\u{E854}", "\u{E855}", "\u{E856}", "\u{E857}", "\u{E858}", "\u{E859}", "\u{E83F}"];
     LEVELS[(level.min(100) as usize + 5) / 10]
 }
 
 /// Red at 10% and under, yellow at 20% and under.
-fn battery_color(theme: &Theme, level: u8, normal: Rgba) -> Rgba {
+pub(super) fn battery_color(theme: &Theme, level: u8, normal: Rgba) -> Rgba {
     theme.level(100.0 - level as f64, 80.0, 90.0, normal)
 }
 
@@ -827,12 +985,12 @@ fn u32_of(v: &PROPVARIANT) -> Option<u32> {
 
 // ---- the battery of a Bluetooth device -----------------------------------------------------------
 
-fn locate(id: &str) -> Option<u32> {
+pub(super) fn locate(id: &str) -> Option<u32> {
     let mut node = 0u32;
     (unsafe { CM_Locate_DevNodeW(&mut node, &HSTRING::from(id), CM_LOCATE_DEVNODE_NORMAL) } == CR_SUCCESS).then_some(node)
 }
 
-fn property(node: u32, key: &DEVPROPKEY) -> Option<Vec<u8>> {
+pub(super) fn property(node: u32, key: &DEVPROPKEY) -> Option<Vec<u8>> {
     let mut kind = DEVPROPTYPE(0);
     let mut size = 0u32;
     unsafe {
@@ -846,7 +1004,7 @@ fn property(node: u32, key: &DEVPROPKEY) -> Option<Vec<u8>> {
 }
 
 /// The present device nodes of an enumerator (`BTHENUM\…`).
-fn device_ids(enumerator: &str) -> Vec<String> {
+pub(super) fn device_ids(enumerator: &str) -> Vec<String> {
     let filter = HSTRING::from(enumerator);
     let flags = CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT;
     let mut len = 0u32;

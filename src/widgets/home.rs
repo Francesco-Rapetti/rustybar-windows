@@ -24,6 +24,7 @@
 //!   /api/services/<domain>/<service>` on a worker thread. The token, a long-lived access token,
 //!   is in Credential Manager (`Get-Clipboard | rustybar secret set home-assistant`).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -160,6 +161,8 @@ struct Setup {
     /// A path on the server or an address.
     dashboard: String,
     groups: Vec<Group>,
+    /// Entities for the Lua widgets (`rb.home`), followed besides the tiles.
+    watch: Vec<String>,
     printer: Printer,
 }
 
@@ -288,6 +291,7 @@ impl Home {
             }
         }
         w.setup = setup;
+        w.publish(&w.states.keys().cloned().collect::<Vec<_>>(), false);
         if !w.mock && w.configured() {
             w.connect();
         }
@@ -311,12 +315,52 @@ impl Home {
         let p = &self.setup.printer;
         let tiles = self.setup.groups.iter().flat_map(|g| g.entities.iter().map(|e| e.id().to_string()));
         let mut ids: Vec<String> = Vec::new();
-        for id in tiles.chain([&p.status, &p.progress, &p.remaining].into_iter().cloned()) {
+        for id in tiles.chain([&p.status, &p.progress, &p.remaining].into_iter().cloned()).chain(self.setup.watch.iter().cloned()) {
             if !id.is_empty() && !ids.contains(&id) {
                 ids.push(id);
             }
         }
         ids
+    }
+
+    // ---- the Lua widgets (`rb.home`) ---------------------------------------------------------
+
+    /// Tells the Lua widgets what changed: the states of `changed`, and whether Home Assistant
+    /// answers; with `came` (it just came online) or a state that changed, the event
+    /// `home_assistant` for the widgets that listen to it.
+    fn publish(&self, changed: &[String], came: bool) {
+        let online = self.is_online();
+        BRIDGE.with(|b| {
+            let mut b = b.borrow_mut();
+            b.present = true;
+            b.online = online;
+            b.wake = Some(self.wake.clone());
+            for id in changed {
+                match self.states.get(id) {
+                    Some(e) => b.states.insert(id.clone(), e.clone()),
+                    None => b.states.remove(id),
+                };
+            }
+        });
+        if self.mock && !came {
+            return;
+        }
+        for id in changed {
+            let state = self.states.get(id).map(|e| e.state.clone()).unwrap_or_default();
+            crate::app::push(crate::app::Event::Trigger { name: "home_assistant".into(), args: vec![("entity".into(), id.clone()), ("state".into(), state)] });
+        }
+        if came && changed.is_empty() {
+            crate::app::push(crate::app::Event::Trigger { name: "home_assistant".into(), args: Vec::new() });
+        }
+    }
+
+    /// The services the Lua widgets asked for, sent as the tiles' are.
+    fn lua_calls(&mut self) {
+        let calls = BRIDGE.with(|b| std::mem::take(&mut b.borrow_mut().calls));
+        for (domain, service, data) in calls {
+            let id = data["entity_id"].str().unwrap_or("lua").to_string();
+            self.service(&id, &domain, &service, data);
+        }
     }
 
     // ---- the connection ----------------------------------------------------------------------
@@ -390,6 +434,7 @@ impl Home {
                     let ids = self.apply(&message["event"]);
                     let first = !self.is_online();
                     self.online = Some(true);
+                    self.publish(&ids, first);
                     self.no_token = false;
                     self.failures = 0;
                     self.settle(&ids);
@@ -464,6 +509,7 @@ impl Home {
         let delay = if self.failures > 1 { 10 } else { 1 };
         self.retry_at = Some(Instant::now() + Duration::from_secs(delay));
         self.arm();
+        self.publish(&[], false);
     }
 
     /// The timer, for the first of what's due: a new try, a note that ends, a value set from the
@@ -1022,6 +1068,7 @@ impl super::Widget for Home {
         }
         let a = self.received();
         let b = self.take_results();
+        self.lua_calls();
         a || b
     }
 
@@ -1118,6 +1165,56 @@ impl super::Widget for Home {
     }
 }
 
+// ---- what the Lua widgets see (`rb.home`) ------------------------------------------------------
+
+/// What the Lua widgets see of Home Assistant, kept by the `home` widget on the main thread: the
+/// states it follows (the tiles', the printer's and `watch`), whether it answers, and the services
+/// the widgets ask for, which it sends as its own. Nothing without a `home` widget.
+#[derive(Default)]
+struct Bridge {
+    present: bool,
+    online: bool,
+    states: HashMap<String, Entity>,
+    calls: Vec<(String, String, Json)>,
+    wake: Option<Arc<Wake>>,
+}
+
+thread_local! {
+    static BRIDGE: RefCell<Bridge> = RefCell::new(Bridge::default());
+}
+
+/// The state and the attributes of an entity the `home` widget follows.
+pub fn state(id: &str) -> Option<(String, BTreeMap<String, Json>)> {
+    BRIDGE.with(|b| b.borrow().states.get(id).map(|e| (e.state.clone(), e.attributes.clone())))
+}
+
+/// Whether the `home` widget is connected to Home Assistant.
+pub fn online() -> bool {
+    BRIDGE.with(|b| b.borrow().online)
+}
+
+/// Asks the `home` widget to call a service (`light`, `toggle`, `{"entity_id": …}`); false
+/// without one.
+pub fn call(domain: &str, service: &str, data: Json) -> bool {
+    BRIDGE.with(|b| {
+        let mut b = b.borrow_mut();
+        if !b.present {
+            return false;
+        }
+        b.calls.push((domain.to_string(), service.to_string(), data));
+        if let Some(w) = &b.wake {
+            w.set();
+        }
+        true
+    })
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        BRIDGE.with(|b| *b.borrow_mut() = Bridge::default());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,6 +1223,19 @@ mod tests {
         let mut w = Home::new(&Options(toml::Table::new()));
         w.setup.groups = vec![Group { title: "Lights".into(), entities: vec![TileDef::Id("light.a".into()), TileDef::Id("climate.b".into()), TileDef::Id("vacuum.c".into())] }];
         w
+    }
+
+    /// What the Lua widgets see (`rb.home`): the states the widget follows, while it's there.
+    #[test]
+    fn lua_widgets_see_the_states() {
+        let mut w = home();
+        let ids = w.apply(&Json::parse(r#"{"a": {"light.a": {"s": "on", "a": {"friendly_name": "Lamp"}}}}"#).unwrap());
+        w.publish(&ids, false);
+        assert_eq!(state("light.a").map(|(s, _)| s).as_deref(), Some("on"));
+        assert!(call("light", "toggle", Json::of([("entity_id", "light.a".into())])));
+        drop(w);
+        assert!(state("light.a").is_none());
+        assert!(!call("light", "toggle", Json::Null));
     }
 
     /// The compressed events of `subscribe_entities`: added, changed (+ and −), removed.

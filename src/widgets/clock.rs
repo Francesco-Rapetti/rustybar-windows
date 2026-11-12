@@ -41,7 +41,7 @@ use crate::ui::{Align, Font, Fonts, Item, Pill, Rect, Scene, Weight};
 const SLACK_MS: u32 = 250;
 
 /// Google Calendar's view of one day.
-const OPEN: &str = "https://calendar.google.com/calendar/r/day/{year}/{month}/{day}";
+pub const OPEN: &str = "https://calendar.google.com/calendar/r/day/{year}/{month}/{day}";
 
 // The calendar's layout, in DIPs: a top row with the date and "Today", the month between ‹ and ›,
 // the days of the week, and always six weeks, so the popup keeps its size from month to month.
@@ -217,7 +217,7 @@ impl super::Widget for Clock {
                 false
             }
             // The bar still shows with a game in front: the clock goes on
-            super::Signal::Foreground(_) | super::Signal::Game(_) | super::Signal::Trigger { .. } => false,
+            super::Signal::Foreground(_) | super::Signal::Game(_) | super::Signal::Trigger { .. } | super::Signal::DevicesChanged | super::Signal::Displays => false,
         }
     }
 

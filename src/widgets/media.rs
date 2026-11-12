@@ -71,6 +71,9 @@ const REPEAT_ONE: &str = "\u{E8ED}";
 
 /// The cover's side, in pixels: twice its size in the popup, so it stays sharp at 200%.
 const COVER_PX: u32 = 152;
+/// The cover in the pill (`pill_cover`): its side in DIPs, and in pixels (twice, as the popup's).
+const PILL_COVER: f32 = 20.0;
+const PILL_COVER_PX: u32 = 40;
 
 // The popup's layout, in DIPs.
 const MARGIN: f32 = 8.0;
@@ -88,6 +91,7 @@ const VOLUME_H: f32 = 32.0;
 struct Track {
     title: String,
     artist: String,
+    album: String,
 }
 
 /// The state, and what the app lets the controls do.
@@ -150,6 +154,9 @@ struct Shared {
     cover: Mutex<Option<(u64, Option<Cover>)>>,
     /// Whether covers get their colors worked out (`cover_colors`).
     cover_colors: bool,
+    /// Whether the pill shows the cover (`pill_cover`), and the latest, small.
+    pill_cover: bool,
+    small_cover: Mutex<Option<(u64, Option<Arc<Image>>)>>,
     /// The titles of the sessions whose app has no readable name, by the app's id, for the switch.
     labels: Mutex<Vec<(String, String)>>,
 }
@@ -164,10 +171,13 @@ impl Shared {
             op.when(move |result| {
                 let Ok(properties) = result else { return };
                 let text = |s: windows::core::Result<HSTRING>| s.map(|s| s.to_string()).unwrap_or_default();
-                let track = Track { title: text(properties.Title()), artist: text(properties.Artist()) };
+                let track = Track { title: text(properties.Title()), artist: text(properties.Artist()), album: text(properties.AlbumTitle()) };
                 *lock(&shared.track) = Some((generation, track));
+                if shared.pill_cover {
+                    *lock(&shared.small_cover) = Some((generation, decode_cover(&properties, PILL_COVER_PX).map(Arc::new)));
+                }
                 if shared.cover_wanted.load(Ordering::Acquire) {
-                    let cover = decode_cover(&properties).map(|image| {
+                    let cover = decode_cover(&properties, COVER_PX).map(|image| {
                         let palette = if shared.cover_colors { Palette::of_bgra(&image.pixels, image.width as usize, 2) } else { None };
                         Cover { image: Arc::new(image), palette }
                     });
@@ -243,6 +253,8 @@ pub struct Media {
     timer: Timer,
     shown: bool,
     show_paused: bool,
+    /// The cover in the pill (`pill_cover`), small.
+    pill_cover: Option<Arc<Image>>,
     /// Whether the popup shows the cover (`cover = false`: no thumbnail read, no WIC).
     covers: bool,
     open: Option<Open>,
@@ -280,6 +292,8 @@ impl Media {
             cover_wanted: AtomicBool::new(false),
             cover: Mutex::new(None),
             cover_colors: options.bool("cover_colors").unwrap_or(true),
+            pill_cover: options.bool("pill_cover").unwrap_or(false),
+            small_cover: Mutex::new(None),
             labels: Mutex::new(Vec::new()),
         });
         if let Some(m) = crate::mock::load("media") {
@@ -314,6 +328,7 @@ impl Media {
             shown: true,
             show_paused: options.bool("paused").unwrap_or(true),
             covers: options.bool("cover").unwrap_or(true),
+            pill_cover: None,
             open: None,
             mock: None,
         }
@@ -340,7 +355,11 @@ impl Media {
                 });
                 Player {
                     aumid: p["app"].str().unwrap_or_default().to_string(),
-                    track: Track { title: p["title"].str().unwrap_or_default().to_string(), artist: p["artist"].str().unwrap_or_default().to_string() },
+                    track: Track {
+                        title: p["title"].str().unwrap_or_default().to_string(),
+                        artist: p["artist"].str().unwrap_or_default().to_string(),
+                        album: p["album"].str().unwrap_or_default().to_string(),
+                    },
                     playback: Playback { status, previous: can("previous"), next: can("next"), toggle: true, seek: can("seek"), shuffle: p["shuffle"].bool(), repeat },
                     timeline: Timeline { start: 0, end: ticks("duration"), position: ticks("position"), updated: now() },
                     cover: p["cover"].str().map(|c| dir.join(c)),
@@ -363,6 +382,7 @@ impl Media {
             shown: true,
             show_paused: options.bool("paused").unwrap_or(true),
             covers: options.bool("cover").unwrap_or(true),
+            pill_cover: None,
             open: None,
             mock: Some(Mock { players, current }),
         };
@@ -377,6 +397,8 @@ impl Media {
         self.track = p.track.clone();
         self.playback = p.playback;
         self.timeline = p.timeline;
+        let small = p.cover.as_deref().filter(|_| self.shared.pill_cover).and_then(|c| decode_file(c, PILL_COVER_PX, PILL_COVER_PX));
+        self.pill_cover = small.map(Arc::new);
         self.fill_mock_popup();
     }
 
@@ -706,6 +728,11 @@ impl Media {
         {
             self.track = track;
         }
+        if let Some((g, small)) = lock(&self.shared.small_cover).take()
+            && g == generation
+        {
+            self.pill_cover = small;
+        }
         if let Some((g, cover)) = lock(&self.shared.cover).take()
             && g == generation
             && let Some(open) = &mut self.open
@@ -747,8 +774,27 @@ impl Media {
     }
 
     /// What the pill and the popup show, to tell whether something changed.
-    fn shown_state(&self) -> (Track, Playback, bool) {
-        (self.track.clone(), self.playback, self.visible())
+    fn shown_state(&self) -> (Track, Playback, bool, Option<u64>) {
+        (self.track.clone(), self.playback, self.visible(), self.pill_cover.as_ref().map(|c| c.id))
+    }
+
+    /// The pill, the title and the artist cut at these widths (no artist with 0): first the cover
+    /// while it plays (with `pill_cover`), else ♪, or the pause sign while paused.
+    fn pill_with(&self, theme: &Theme, title_w: f32, artist_w: f32) -> Option<Pill> {
+        if !self.visible() {
+            return None;
+        }
+        let paused = !self.playback.playing();
+        let color = if paused { theme.subtext } else { theme.text };
+        let lead = match (&self.pill_cover, paused) {
+            (Some(cover), false) => Item::image(cover.clone(), PILL_COVER),
+            _ => Item::icon(if paused { PAUSE } else { NOTE }, color),
+        };
+        let mut items = vec![lead, Item::text(&self.track.title, color).max_width(title_w)];
+        if artist_w > 0.0 && !self.track.artist.is_empty() {
+            items.push(Item::text(&self.track.artist, theme.subtext).max_width(artist_w).space(8.0));
+        }
+        Some(Pill::new(items).gap(6.0))
     }
 }
 
@@ -761,26 +807,17 @@ impl Drop for Media {
 
 impl super::Widget for Media {
     fn pill(&self, theme: &Theme) -> Option<Pill> {
-        if !self.visible() {
-            return None;
-        }
-        let paused = !self.playback.playing();
-        let (icon, title) = if paused { (PAUSE, theme.subtext) } else { (NOTE, theme.text) };
-        let mut items = vec![Item::icon(icon, title), Item::text(&self.track.title, title).max_width(240.0)];
-        if !self.track.artist.is_empty() {
-            items.push(Item::text(&self.track.artist, theme.subtext).max_width(160.0).space(8.0));
-        }
-        Some(Pill::new(items).gap(6.0))
+        self.pill_with(theme, 240.0, 160.0)
     }
 
     /// The title alone, cut shorter.
     fn compact(&self, theme: &Theme) -> Option<Pill> {
-        if !self.visible() {
-            return None;
-        }
-        let paused = !self.playback.playing();
-        let (icon, title) = if paused { (PAUSE, theme.subtext) } else { (NOTE, theme.text) };
-        Some(Pill::new(vec![Item::icon(icon, title), Item::text(&self.track.title, title).max_width(110.0)]).gap(6.0))
+        self.pill_with(theme, 110.0, 0.0)
+    }
+
+    /// The title and the artist cut later, when the bar has the room (in the center group).
+    fn wide(&self, theme: &Theme) -> Option<Pill> {
+        self.pill_with(theme, 520.0, 320.0)
     }
 
     fn handles(&self) -> Vec<HANDLE> {
@@ -947,9 +984,15 @@ impl super::Widget for Media {
         let x = cover.x + COVER + 12.0;
         let w = MARGIN + INNER - PAD - x;
         let title = if self.track.title.is_empty() { t("Niente in riproduzione", "Nothing playing") } else { self.track.title.as_str() };
-        scene.text(Rect::new(x, cover.y + 6.0, w, 22.0), title, Font::new(theme.font_size + 1.0, Weight::SemiBold), theme.text, Align::Start);
-        scene.text(Rect::new(x, cover.y + 30.0, w, 20.0), self.track.artist.as_str(), Font::new(theme.font_size, Weight::Regular), theme.text, Align::Start);
-        scene.text(Rect::new(x, cover.y + 52.0, w, 18.0), open.app.as_str(), Font::new(theme.small_size, Weight::Medium), theme.subtext, Align::Start);
+        // With an album, four lines in the cover's height instead of three
+        let album = !self.track.album.is_empty();
+        let [t_y, a_y, app_y] = if album { [2.0, 24.0, 61.0] } else { [6.0, 30.0, 52.0] };
+        scene.text(Rect::new(x, cover.y + t_y, w, 22.0), title, Font::new(theme.font_size + 1.0, Weight::SemiBold), theme.text, Align::Start);
+        scene.text(Rect::new(x, cover.y + a_y, w, 20.0), self.track.artist.as_str(), Font::new(theme.font_size, Weight::Regular), theme.text, Align::Start);
+        if album {
+            scene.text(Rect::new(x, cover.y + 43.0, w, 18.0), self.track.album.as_str(), Font::new(theme.small_size + 1.0, Weight::Regular), theme.subtext, Align::Start);
+        }
+        scene.text(Rect::new(x, cover.y + app_y, w, 16.0), open.app.as_str(), Font::new(theme.small_size, Weight::Medium), theme.subtext, Align::Start);
 
         let mut y = cover.y + COVER + PAD;
         // Where the track is
@@ -1336,7 +1379,7 @@ fn readable(aumid: &str) -> String {
 
 /// The track's cover, cut to a square from its middle and scaled to `COVER_PX`, ready to draw.
 /// On the thread the properties came on (a worker of Windows' thread pool).
-fn decode_cover(properties: &Properties) -> Option<Image> {
+fn decode_cover(properties: &Properties, side: u32) -> Option<Image> {
     let reference = properties.Thumbnail().ok()?;
     let stream = reference.OpenReadAsync().ok()?.join().ok()?;
     decode(
@@ -1344,8 +1387,8 @@ fn decode_cover(properties: &Properties) -> Option<Image> {
             let source: IStream = CreateStreamOverRandomAccessStream(&stream)?;
             wic.CreateDecoderFromStream(&source, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
         },
-        COVER_PX,
-        COVER_PX,
+        side,
+        side,
     )
 }
 

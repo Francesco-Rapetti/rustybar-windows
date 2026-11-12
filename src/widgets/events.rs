@@ -50,7 +50,7 @@ const ROW: f32 = 40.0;
 const CHIP_H: f32 = 28.0;
 const BUTTON_H: f32 = 32.0;
 
-const GOOGLE_DAY: &str = "https://calendar.google.com/calendar/r/day/{year}/{month}/{day}";
+pub const GOOGLE_DAY: &str = "https://calendar.google.com/calendar/r/day/{year}/{month}/{day}";
 
 /// A calendar of the config.
 #[derive(Clone, Debug, serde::Deserialize)]

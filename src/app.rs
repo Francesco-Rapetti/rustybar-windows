@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PM_REMOVE, PeekMessageW,
     PostQuitMessage, QS_ALLINPUT, RegisterClassExW, RegisterWindowMessageW, SPI_GETCLIENTAREAANIMATION,
     SPI_SETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SystemParametersInfoW,
-    TranslateMessage, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_COPYDATA, WM_DISPLAYCHANGE,
+    TranslateMessage, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_COPYDATA, WM_DEVICECHANGE, WM_DISPLAYCHANGE,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_POWERBROADCAST, WM_QUIT, WM_SETTINGCHANGE, WM_TIMECHANGE, WNDCLASSEXW,
     WS_POPUP,
 };
@@ -38,6 +38,7 @@ use windows::core::{BOOL, HSTRING, PCWSTR, Result, w};
 
 use crate::bar::{self, Bar, Sides};
 use crate::config::{self, Config, Options};
+use crate::crash;
 use crate::gfx::Gfx;
 use crate::ipc;
 use crate::log;
@@ -72,6 +73,7 @@ pub enum Event {
     AnimationsChanged,
     TimeChanged,
     Resume,
+    DevicesChanged,
     /// `rustybar msg`: the command's words, one a line, and the window to answer.
     Command { text: String, reply: HWND },
     /// `rb.trigger` in a Lua widget: an event for the Lua widgets that listen to it.
@@ -108,7 +110,19 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 struct Slot {
     name: String,
+    /// The kind and the options the widget was made with: a reload keeps it while they stay the
+    /// same (see `make_widgets`).
+    kind: String,
+    options: toml::Table,
+    /// Written in Lua: it goes, with the Lua state, when a `.lua` file changes.
+    lua: bool,
     widget: Box<dyn Widget>,
+}
+
+/// The Lua state, and why some of its files didn't load (each Lua widget made from it says so).
+struct LuaState {
+    host: crate::lua::Host,
+    problem: Option<String>,
 }
 
 pub struct App {
@@ -117,7 +131,7 @@ pub struct App {
     text: Text,
     widgets: Vec<Slot>,
     /// The Lua state, while some widget of the layout is written in Lua.
-    lua: Option<crate::lua::Host>,
+    lua: Option<LuaState>,
     /// The pills as last measured, by widget name.
     measured: HashMap<String, Measured>,
     // The popups and the bars go before the devices they draw with
@@ -130,6 +144,8 @@ pub struct App {
     control: HWND,
     hook: HWINEVENTHOOK,
     config_watch: Option<HANDLE>,
+    /// Runs from a change in the config dir until the writes have settled (see `config_changed`).
+    config_settle: crate::wake::Timer,
     config_stamp: Stamp,
     names: Names,
     front: Foreground,
@@ -147,6 +163,8 @@ pub fn run() {
     let started = Instant::now();
     log::init();
     log!("rustybar {} starting, config {}", env!("CARGO_PKG_VERSION"), config::file().display());
+    crash::after_failure();
+    crash::install(true);
     process::setup();
     let Some(_instance) = process::single_instance() else {
         log!("a bar already runs for this config dir");
@@ -185,7 +203,7 @@ impl App {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
         };
-        let (widgets, lua) = make_widgets(&config, &theme);
+        let (widgets, lua, _) = make_widgets(&config, &theme, Vec::new(), None);
         let mut app = App {
             widgets,
             lua,
@@ -200,6 +218,7 @@ impl App {
             control,
             hook,
             config_watch: watch_config_dir(),
+            config_settle: crate::wake::Timer::new(),
             config_stamp: config_stamp(),
             names: Names::default(),
             front: Foreground::default(),
@@ -225,23 +244,28 @@ impl App {
             self.frame();
             let mut handles: Vec<HANDLE> = Vec::new();
             // Each handle's owner: a widget and which of its handles, or the config dir
-            let mut owners: Vec<Option<(usize, usize)>> = Vec::new();
+            let mut owners: Vec<Owner> = Vec::new();
             if let Some(h) = self.config_watch {
                 handles.push(h);
-                owners.push(None);
+                owners.push(Owner::ConfigDir);
+            }
+            if let Some(h) = self.config_settle.handle() {
+                handles.push(h);
+                owners.push(Owner::Settled);
             }
             for (i, slot) in self.widgets.iter().enumerate() {
                 for (j, h) in slot.widget.handles().into_iter().enumerate() {
                     handles.push(h);
-                    owners.push(Some((i, j)));
+                    owners.push(Owner::Widget(i, j));
                 }
             }
             let r = unsafe { MsgWaitForMultipleObjectsEx(Some(&handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
             let index = r.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
             if index < handles.len() {
                 match owners[index] {
-                    None => self.config_changed(),
-                    Some((i, j)) => {
+                    Owner::ConfigDir => self.config_dir_changed(),
+                    Owner::Settled => self.config_changed(),
+                    Owner::Widget(i, j) => {
                         if self.widgets[i].widget.signaled_at(j) {
                             self.changed(i);
                         }
@@ -326,6 +350,7 @@ impl App {
                 self.drop_popups();
                 self.build_bars();
                 self.update_visibility();
+                self.broadcast(&Signal::Displays);
             }
             Event::ThemeChanged => {
                 if self.theme.follows_windows {
@@ -335,6 +360,7 @@ impl App {
             Event::AnimationsChanged => self.system_animations = system_animations(),
             Event::TimeChanged => self.broadcast(&Signal::TimeChanged),
             Event::Resume => self.broadcast(&Signal::Resume),
+            Event::DevicesChanged => self.broadcast(&Signal::DevicesChanged),
             Event::Command { text, reply } => {
                 let words: Vec<&str> = text.lines().collect();
                 let answer = self.command(&words);
@@ -348,7 +374,10 @@ impl App {
     fn command(&mut self, words: &[&str]) -> String {
         match words {
             ["ping"] => "pong".into(),
-            ["reload"] => match self.reload() {
+            // To try the restart after a failure, in a bar started with RUSTYBAR_TEST_CRASH
+            ["crash"] if std::env::var_os("RUSTYBAR_TEST_CRASH").is_some() => panic!("a test crash (rustybar msg crash)"),
+            // Everything from the start, as a restart would, even what didn't change
+            ["reload"] => match self.reload(true, true) {
                 Ok(()) => "ok".into(),
                 Err(e) => e,
             },
@@ -633,7 +662,11 @@ impl App {
 
     fn build_bars(&mut self) {
         self.bars.clear();
-        for (monitor, screen) in monitors() {
+        let primary_only = self.config.bar.screens == "primary";
+        for (monitor, screen, primary) in monitors() {
+            if primary_only && !primary {
+                continue;
+            }
             let mut dpi = (96u32, 96u32);
             unsafe {
                 let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi.0, &mut dpi.1);
@@ -683,22 +716,89 @@ impl App {
     /// widgets of a side that don't. A bar where everything fits in full, as usual on a wide
     /// screen, costs a sum; the compact pills are measured only while some bar needs them.
     fn fit_bars(&mut self, full: Sides) -> Vec<Sides> {
+        let full = self.always_compact(full);
         let (margin, gap) = (self.config.bar.margin, self.theme.item_gap);
+        let wide = self.measure_wide(&full);
         let fits_full = |bar: &Bar| {
             let room = room(bar.width(), &full, total(full.center.iter().map(|m| m.width), gap), margin, gap);
             bar.fit.full() && fit::fits(room, (total(full.left.iter().map(|m| m.width), gap), total(full.right.iter().map(|m| m.width), gap)), 0.0)
         };
         if self.bars.iter().all(fits_full) {
             for bar in &mut self.bars {
+                let was_wide = bar.fit.center_wide;
                 bar.fit = fit::Fitted::default();
+                bar.fit.center_wide = was_wide;
             }
-            return self.bars.iter().map(|_| full.clone()).collect();
+            return self.bars.iter_mut().map(|bar| widen(bar.width(), &mut bar.fit, full.clone(), &wide, margin, gap)).collect();
         }
         let compact = self.measure_compact(&full);
         let more = [self.measure_more(0), self.measure_more(1)];
         let [Some(left), Some(right)] = more else { return self.bars.iter().map(|_| full.clone()).collect() };
         let more = [left, right];
-        self.bars.iter_mut().map(|bar| fit_bar(bar.width(), &mut bar.fit, &full, &compact, &more, margin, gap)).collect()
+        self.bars
+            .iter_mut()
+            .map(|bar| {
+                let was_wide = bar.fit.center_wide;
+                let sides = fit_bar(bar.width(), &mut bar.fit, &full, &compact, &more, margin, gap);
+                bar.fit.center_wide = was_wide;
+                widen(bar.width(), &mut bar.fit, sides, &wide, margin, gap)
+            })
+            .collect()
+    }
+
+    /// The widgets of `[bar] always_compact` in their compact form, on every screen, as if that
+    /// were their own.
+    fn always_compact(&mut self, mut full: Sides) -> Sides {
+        if self.config.bar.always_compact.is_empty() {
+            return full;
+        }
+        let names = self.config.bar.always_compact.clone();
+        for m in full.left.iter_mut().chain(full.center.iter_mut()).chain(full.right.iter_mut()) {
+            if !names.contains(&m.key) {
+                continue;
+            }
+            let Some(pill) = self.widgets.iter().find(|s| s.name == m.key).and_then(|s| s.widget.compact(&self.theme)) else { continue };
+            let key = format!("{}\u{0}compact", m.key);
+            let measured = match self.measured.get(&key).filter(|c| c.pill == pill) {
+                Some(c) => c.clone(),
+                None => match self.text.measure(&m.key, pill, &self.theme) {
+                    Ok(c) => {
+                        self.measured.insert(key, c.clone());
+                        c
+                    }
+                    Err(_) => continue,
+                },
+            };
+            *m = measured;
+        }
+        full
+    }
+
+    /// The wide pills of the center group's widgets that have one wider than their own, by name.
+    fn measure_wide(&mut self, full: &Sides) -> HashMap<String, Measured> {
+        let mut out = HashMap::new();
+        for m in &full.center {
+            let Some(slot) = self.widgets.iter().find(|s| s.name == m.key) else { continue };
+            let Some(pill) = slot.widget.wide(&self.theme).filter(|p| *p != m.pill) else { continue };
+            let key = format!("{}\u{0}wide", m.key);
+            let measured = match self.measured.get(&key).filter(|c| c.pill == pill) {
+                Some(c) => c.clone(),
+                None => match self.text.measure(&m.key, pill, &self.theme) {
+                    Ok(c) => {
+                        self.measured.insert(key, c.clone());
+                        c
+                    }
+                    Err(e) => {
+                        log!("{}: {e}", m.key);
+                        continue;
+                    }
+                },
+            };
+            if measured.width > m.width {
+                out.insert(m.key.clone(), measured);
+            }
+        }
+        out
     }
 
     /// The compact pills of the widgets that have one narrower than their own, by name.
@@ -841,8 +941,8 @@ impl App {
 
     fn reload_theme(&mut self) {
         self.theme = Theme::from_config(&self.config.theme);
-        if let Some(host) = &self.lua {
-            host.set_theme(&self.theme);
+        if let Some(lua) = &self.lua {
+            lua.host.set_theme(&self.theme);
         }
         match Text::new(&self.theme) {
             Ok(text) => self.text = text,
@@ -1108,52 +1208,95 @@ impl App {
         }
     }
 
-    /// Something changed in the config dir: if it's the config file, everything starts again
-    /// from it but the bars, which only move when `[bar]` changed.
-    fn config_changed(&mut self) {
+    /// Something changed in the config dir: the files are read once the writes have settled, a
+    /// moment later, so that a file being written (by the settings window, by an editor) is never
+    /// read half done.
+    fn config_dir_changed(&mut self) {
         if let Some(h) = self.config_watch {
             unsafe {
                 let _ = FindNextChangeNotification(h);
             }
         }
+        self.config_settle.start(SETTLE_MS, 0);
+    }
+
+    /// The config dir is quiet again: if a config file or a Lua file changed, the bar follows it
+    /// (see `reload`).
+    fn config_changed(&mut self) {
+        self.config_settle.stop();
         let stamp = config_stamp();
         if stamp == self.config_stamp {
             return;
         }
+        let lua_changed = stamp.1 != self.config_stamp.1;
         self.config_stamp = stamp;
-        let _ = self.reload();
+        let _ = self.reload(false, lua_changed);
     }
 
-    /// Everything starts again from the config files, but the bars, which only move when `[bar]`
-    /// changed. A config that can't be read leaves the bar as it was.
-    fn reload(&mut self) -> std::result::Result<(), String> {
+    /// The bar follows the config files again. Only what changed starts again: a widget whose
+    /// kind and options are the same keeps running as it was (no new read, connection or child
+    /// process), the Lua state stays unless `lua_changed` (a `.lua` file changed), the theme and
+    /// the bars are made again only when `[theme]` or `[bar]` changed. With `full` everything
+    /// starts again, as at start-up. A config that can't be read leaves the bar as it was.
+    fn reload(&mut self, full: bool, lua_changed: bool) -> std::result::Result<(), String> {
         let (config, error) = config::load();
         if let Some(e) = error {
             log!("config: {e}");
             return Err(e);
         }
-        log!("config reloaded");
         self.drop_popups();
         let bars_changed = config.bar != self.config.bar;
+        let theme_changed = full || config.theme != self.config.theme;
         self.config = config;
-        // The old widgets, and the Lua state with them, go before the new ones come
-        self.widgets.clear();
-        self.lua = None;
-        self.reload_theme();
-        (self.widgets, self.lua) = make_widgets(&self.config, &self.theme);
-        let front = self.front.clone();
-        self.broadcast(&Signal::Foreground(&front));
-        // The new widgets start as if a bar showed and no game was in front
-        self.game_in_front = self.config.games.apps.iter().any(|a| a.eq_ignore_ascii_case(&front.exe));
-        if self.game_in_front {
-            self.broadcast(&Signal::Game(true));
+        // What goes, goes before the new comes: the Lua widgets with their state
+        if full {
+            self.widgets.clear();
+        } else if lua_changed {
+            self.widgets.retain(|s| !s.lua);
         }
-        if !self.bars.iter().any(|b| b.visible) {
-            self.broadcast(&Signal::Shown(false));
+        if full || lua_changed {
+            self.lua = None;
+        }
+        if theme_changed {
+            self.reload_theme();
+        }
+        let old = std::mem::take(&mut self.widgets);
+        let (widgets, lua, fresh) = make_widgets(&self.config, &self.theme, old, self.lua.take());
+        (self.widgets, self.lua) = (widgets, lua);
+        log!(
+            "config reloaded: {} of {} widgets made again{}",
+            fresh.len(),
+            self.widgets.len(),
+            if fresh.is_empty() { String::new() } else { format!(" ({})", fresh.iter().map(|&i| self.widgets[i].name.as_str()).collect::<Vec<_>>().join(", ")) }
+        );
+        // The new widgets start as if a bar showed and no game was in front: they hear how
+        // things are; the kept ones only what changed for them
+        let front = self.front.clone();
+        let game = self.config.games.apps.iter().any(|a| a.eq_ignore_ascii_case(&front.exe));
+        let shown = self.bars.iter().any(|b| b.visible);
+        let kept_hear_game = game != self.game_in_front;
+        self.game_in_front = game;
+        for i in 0..self.widgets.len() {
+            let new = fresh.contains(&i);
+            let w = &mut self.widgets[i].widget;
+            let mut changed = false;
+            if new {
+                changed |= w.event(&Signal::Foreground(&front));
+                if !shown {
+                    changed |= w.event(&Signal::Shown(false));
+                }
+            }
+            if (new && game) || (!new && kept_hear_game) {
+                changed |= w.event(&Signal::Game(game));
+            }
+            if changed || new {
+                self.changed(i);
+            }
         }
         if bars_changed {
             self.build_bars();
-        } else {
+        } else if theme_changed {
+            // Every pill drawn again, in the new colors and fonts
             for bar in &mut self.bars {
                 if let Some(gfx) = &self.gfx {
                     let _ = bar.attach(gfx);
@@ -1181,7 +1324,20 @@ impl Drop for App {
     }
 }
 
-/// The widgets of `[layout]`, in order, each name once.
+/// Who a handle the loop waits on belongs to.
+#[derive(Clone, Copy)]
+enum Owner {
+    /// The watch of the config dir.
+    ConfigDir,
+    /// The config dir has been quiet since its last change.
+    Settled,
+    /// A widget, and which of its handles.
+    Widget(usize, usize),
+}
+
+/// How long the config dir stays quiet before the files are read, in ms.
+const SETTLE_MS: i64 = 150;
+
 /// The `⋯` pill's icon (Segoe Fluent Icons' «More»).
 const MORE_ICON: &str = "\u{E712}";
 
@@ -1200,6 +1356,27 @@ fn room(width: f32, sides: &Sides, center: f32, margin: f32, gap: f32) -> Room {
         let side = (width - center) / 2.0 - margin - gap;
         Room::Split { left: side, right: side }
     }
+}
+
+/// The center group in its wide form (see `Widget::wide`), when every pill keeps its full form
+/// beside it: with `SLACK` to spare the first time, so that it doesn't flip at the limit. `state`
+/// says whether it was wide (and says it for the next time).
+fn widen(width: f32, state: &mut Fitted, mut sides: Sides, wide: &HashMap<String, Measured>, margin: f32, gap: f32) -> Sides {
+    let was_wide = std::mem::take(&mut state.center_wide);
+    if !state.full() || !sides.center.iter().any(|m| wide.contains_key(&m.key)) {
+        return sides;
+    }
+    let center = total(sides.center.iter().map(|m| wide.get(&m.key).unwrap_or(m).width), gap);
+    let lr = (total(sides.left.iter().map(|m| m.width), gap), total(sides.right.iter().map(|m| m.width), gap));
+    if fit::fits(room(width, &sides, center, margin, gap), lr, if was_wide { 0.0 } else { fit::SLACK }) {
+        for m in &mut sides.center {
+            if let Some(w) = wide.get(&m.key) {
+                *m = w.clone();
+            }
+        }
+        state.center_wide = true;
+    }
+    sides
 }
 
 /// The pills of a bar `width` DIPs wide in the forms that fit it: the center group turns compact
@@ -1292,6 +1469,10 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
         scene.fill(Rect::new(x + p.x - bar::HIGHLIGHT_X, y + bar::HIGHLIGHT_Y, p.width + 2.0 * bar::HIGHLIGHT_X, h), h / 2.0, t.primary);
     }
     for (item, p) in m.pill.items.iter().zip(&m.items) {
+        if let Some(image) = &item.image {
+            scene.image(Rect::new(x + p.x, y + (t.pill_height - p.width) / 2.0, p.width, p.width), 4.0, image.clone());
+            continue;
+        }
         if item.logo {
             for r in crate::ui::logo(x + p.x + p.text_x, y, p.width - p.text_x, t.pill_height, t.font_size, 1.0) {
                 scene.fill(r, 0.0, item.color);
@@ -1310,51 +1491,80 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
 }
 
 /// The widgets of `[layout]`, and the Lua state when one of them is written in Lua: made only
-/// when the layout names a widget no built-in has and `widgets\*.lua` files are there.
-fn make_widgets(config: &Config, theme: &Theme) -> (Vec<Slot>, Option<crate::lua::Host>) {
-    let names: Vec<&String> = config.layout.left.iter().chain(&config.layout.center).chain(&config.layout.right).collect();
-    let needs_lua = names.iter().any(|n| !widgets::KINDS.contains(&config::widget_kind(config, n).as_str()));
-    let (host, errors) = match needs_lua.then(|| crate::lua::Host::load(&config::dir(), theme)).flatten() {
-        Some((host, errors)) => (Some(host), errors),
-        None => (None, Vec::new()),
-    };
-    for e in &errors {
-        log!("{e}");
-    }
-    // A widget whose file didn't load says why
-    let problem = (!errors.is_empty()).then(|| errors.join("\n"));
-    let mut slots: Vec<Slot> = Vec::new();
-    let mut lua_used = false;
-    for name in names {
-        if slots.iter().any(|s| &s.name == name) {
+/// when the layout names a widget no built-in has and `widgets\*.lua` files are there. A widget
+/// of `old` with the same name, kind and options is kept as it is (and so is `lua`, the Lua state
+/// of the kept Lua widgets); the others of `old` go before any new one is made. Also returns
+/// where the widgets made anew are in the list.
+fn make_widgets(config: &Config, theme: &Theme, mut old: Vec<Slot>, lua: Option<LuaState>) -> (Vec<Slot>, Option<LuaState>, Vec<usize>) {
+    let mut names: Vec<&String> = Vec::new();
+    for name in config.layout.left.iter().chain(&config.layout.center).chain(&config.layout.right) {
+        if names.contains(&name) {
             log!("{name} is in [layout] twice: shown once");
+        } else {
+            names.push(name);
+        }
+    }
+    let wanted = |name: &str| (config::widget_kind(config, name), config.widgets.get(name).cloned().unwrap_or_default());
+    // What stays, taken out of `old` by name; the rest goes now
+    let mut kept: HashMap<String, Slot> = HashMap::new();
+    for slot in old.drain(..) {
+        let (kind, options) = wanted(&slot.name);
+        if names.contains(&&slot.name) && slot.kind == kind && slot.options == options {
+            kept.insert(slot.name.clone(), slot);
+        }
+    }
+    drop(old);
+    let needs_lua = names.iter().any(|n| !kept.contains_key(n.as_str()) && !widgets::KINDS.contains(&config::widget_kind(config, n).as_str()));
+    let lua = match lua {
+        Some(state) => Some(state),
+        None => needs_lua.then(|| crate::lua::Host::load(&config::dir(), theme)).flatten().map(|(host, errors)| {
+            for e in &errors {
+                log!("{e}");
+            }
+            // A widget whose file didn't load says why
+            LuaState { host, problem: (!errors.is_empty()).then(|| errors.join("\n")) }
+        }),
+    };
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut fresh = Vec::new();
+    for name in names {
+        if let Some(slot) = kept.remove(name.as_str()) {
+            slots.push(slot);
             continue;
         }
-        let kind = config::widget_kind(config, name);
-        let options = Options(config.widgets.get(name).cloned().unwrap_or_default());
-        match widgets::create(&kind, &options) {
-            Some(widget) => slots.push(Slot { name: name.clone(), widget }),
-            None if host.is_some() => {
-                lua_used = true;
-                let widget = widgets::lua::LuaWidget::new(host.as_ref(), name, &kind, &options, problem.clone());
-                slots.push(Slot { name: name.clone(), widget: Box::new(widget) });
+        let (kind, table) = wanted(name);
+        let options = Options(table.clone());
+        let (widget, is_lua): (Box<dyn Widget>, bool) = match widgets::create(&kind, &options) {
+            Some(widget) => (widget, false),
+            None if lua.is_some() => {
+                let state = lua.as_ref().expect("checked");
+                (Box::new(widgets::lua::LuaWidget::new(Some(&state.host), name, &kind, &options, state.problem.clone())), true)
             }
-            None => log!("unknown widget {name:?} (kinds: {}, or a Lua widget in widgets\\*.lua)", widgets::KINDS.join(", ")),
-        }
+            None => {
+                let hint = config::closest(&kind, widgets::KINDS.iter().copied()).map(|n| format!(", maybe {n:?}")).unwrap_or_default();
+                log!("unknown widget {name:?}{hint} (kinds: {}, or a Lua widget in widgets\\*.lua)", widgets::KINDS.join(", "));
+                continue;
+            }
+        };
+        fresh.push(slots.len());
+        slots.push(Slot { name: name.clone(), kind, options: table, lua: is_lua, widget });
     }
-    (slots, host.filter(|_| lua_used))
+    let lua_used = slots.iter().any(|s| s.lua);
+    (slots, lua.filter(|_| lua_used), fresh)
 }
 
-fn monitors() -> Vec<(HMONITOR, RECT)> {
+/// The screens: each with its rectangle, and whether it's the main one.
+fn monitors() -> Vec<(HMONITOR, RECT, bool)> {
     unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
-        let list = unsafe { &mut *(data.0 as *mut Vec<(HMONITOR, RECT)>) };
+        let list = unsafe { &mut *(data.0 as *mut Vec<(HMONITOR, RECT, bool)>) };
         let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-            list.push((monitor, info.rcMonitor));
+            // MONITORINFOF_PRIMARY
+            list.push((monitor, info.rcMonitor, info.dwFlags & 1 != 0));
         }
         BOOL(1)
     }
-    let mut list: Vec<(HMONITOR, RECT)> = Vec::new();
+    let mut list: Vec<(HMONITOR, RECT, bool)> = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut list as *mut _ as isize));
     }
@@ -1423,6 +1633,8 @@ unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         }
         WM_DWMCOLORIZATIONCOLORCHANGED => push(Event::ThemeChanged),
         WM_TIMECHANGE => push(Event::TimeChanged),
+        // DBT_DEVNODES_CHANGED
+        WM_DEVICECHANGE if wparam.0 == 0x0007 => push(Event::DevicesChanged),
         WM_POWERBROADCAST => {
             if wparam.0 as u32 == PBT_APMRESUMEAUTOMATIC || wparam.0 as u32 == PBT_APMRESUMESUSPEND {
                 push(Event::Resume);

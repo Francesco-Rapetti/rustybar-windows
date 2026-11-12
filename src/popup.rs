@@ -455,7 +455,15 @@ fn paint(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, theme: 
             brush.SetColor(&gfx::color(colors.border));
             ctx.DrawRoundedRectangle(&outline, brush, b, None);
         }
-        for shape in &scene.shapes {
+    }
+    paint_shapes(ctx, brush, s, &scene.shapes, fonts);
+}
+
+/// A scene's shapes, in order, in DIPs at scale `s`: what a popup draws inside its frame, and the
+/// settings window everywhere.
+pub fn paint_shapes(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, shapes: &[Shape], fonts: &Fonts) {
+    unsafe {
+        for shape in shapes {
             match shape {
                 Shape::Fill { rect, radius, color } => {
                     brush.SetColor(&gfx::color(*color));
@@ -480,13 +488,19 @@ fn paint(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, theme: 
                         log!("popup image: {e}");
                     }
                 }
+                Shape::Para { rect, text, font, color } => {
+                    let Ok((layout, _)) = fonts.wrapped(text, *font, rect.w) else { continue };
+                    brush.SetColor(&gfx::color(*color));
+                    let at = Vector2 { X: (rect.x * s).round() / s, Y: (rect.y * s).round() / s };
+                    ctx.DrawTextLayout(at, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                }
             }
         }
     }
 }
 
 /// A picture stretched over `rect` with rounded corners: a bitmap brush filling the shape.
-fn draw_image(ctx: &ID2D1DeviceContext, rect: Rect, radius: f32, image: &Image) -> Result<()> {
+pub fn draw_image(ctx: &ID2D1DeviceContext, rect: Rect, radius: f32, image: &Image) -> Result<()> {
     if image.width == 0 || image.height == 0 || image.pixels.len() < (image.width * image.height * 4) as usize {
         return Ok(());
     }

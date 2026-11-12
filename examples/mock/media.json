@@ -2,12 +2,12 @@
   "current": 0,
   "players": [
     {
-      "app": "Spotify.exe", "title": "Neon Harbor", "artist": "The Paper Lanterns",
+      "app": "Spotify.exe", "title": "Neon Harbor", "artist": "The Paper Lanterns", "album": "Low Tide Lights",
       "state": "playing", "duration": 214, "position": 83,
       "shuffle": false, "repeat": "all", "volume": 70, "cover": "media/harbor.jpg"
     },
     {
-      "app": "Aurora.exe", "title": "Glass Orchard", "artist": "Mira Solen",
+      "app": "Aurora.exe", "title": "Glass Orchard", "artist": "Mira Solen", "album": "Orchard Songs",
       "state": "paused", "duration": 187, "position": 42,
       "shuffle": true, "repeat": "off", "volume": 55, "cover": "media/orchard.png"
     },

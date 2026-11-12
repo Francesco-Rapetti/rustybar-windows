@@ -1,0 +1,48 @@
+# The config the settings window edits on made-up data (RUSTYBAR_MOCK, see the README): a copy
+# that no bar reads, so nothing the window does here reaches a bar. Every name, server and
+# calendar in it is made up.
+#
+#   $env:RUSTYBAR_MOCK = "examples\mock"; $env:RUSTYBAR_LOCALE = "en-US"
+#   target\release\rustybar.exe settings layout
+#   target\release\rustybar.exe settings --shot layout docs\screenshots\settings-layout.png 2
+
+[bar]
+reserve = false
+
+[theme]
+# The accent of a fresh Windows, not yours
+primary = "#4cc2ff"
+
+[layout]
+left = ["power", "workspaces", "front_app"]
+center = ["media"]
+right = ["home", "events", "docker", "claude", "claude_work", "network", "audio", "system", "clock"]
+
+[games]
+apps = ["game.exe", "racer.exe"]
+
+[widgets.claude_work]
+type = "claude"
+dir = "~/.claude-work"
+color = "#89b4fa"
+
+[widgets.home]
+server = "http://homeassistant.local:8123"
+
+[[widgets.home.groups]]
+title = "Lights"
+entities = ["light.living_room", { id = "switch.bedroom_lamp", icon = "EA80" }, "switch.coffee_machine", "cover.living_room_blind"]
+
+[[widgets.home.groups]]
+title = "Climate"
+entities = ["climate.living_room"]
+
+[widgets.home.printer]
+plug = "switch.printer"
+off = "script.printer_off"
+status = "sensor.printer_status"
+progress = "sensor.printer_progress"
+remaining = "sensor.printer_remaining"
+
+[widgets.events]
+calendars = [{ name = "Work", color = "sky" }, { name = "Personal", color = "green" }, { name = "Team", color = "mauve" }]

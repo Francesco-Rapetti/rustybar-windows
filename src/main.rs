@@ -7,6 +7,7 @@
 mod app;
 mod bar;
 mod config;
+mod crash;
 mod fit;
 mod gfx;
 mod i18n;
@@ -22,6 +23,7 @@ mod palette;
 mod popup;
 mod process;
 mod secret;
+mod settings;
 mod stats;
 mod theme;
 mod ui;
@@ -63,6 +65,7 @@ fn main() {
                 }
             }
         }
+        Some("settings") => std::process::exit(settings::run(&args[1..])),
         Some("secret") => {
             process::attach_console();
             std::process::exit(secret::command(&args[1..]));

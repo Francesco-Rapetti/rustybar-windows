@@ -9,5 +9,13 @@
     {"name": "Microphone (USB Audio)", "form": 4}
   ],
   "output_volume": 40,
-  "input_volume": 70
+  "input_volume": 70,
+  "microphone_in_use": ["Discord"],
+  "camera_in_use": [],
+  "apps": [
+    {"name": "Starfall Online", "volume": 80, "active": true},
+    {"name": "Discord", "volume": 65, "active": true},
+    {"name": "Spotify", "volume": 35, "muted": true},
+    {"name": "System sounds", "volume": 100}
+  ]
 }

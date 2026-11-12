@@ -1,0 +1,6 @@
+{
+  "screens": [
+    {"name": "Vista 49", "width": 5120, "height": 1440, "hz": 120, "rates": [60, 100, 120, 144, 240], "hdr": true, "brightness": 70},
+    {"name": "Side Panel", "width": 1920, "height": 1080, "hz": 60, "rates": [50, 60, 75], "brightness": 45}
+  ]
+}

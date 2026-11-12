@@ -13,19 +13,23 @@ use crate::ui::{Fonts, Pill, Scene};
 pub mod audio;
 pub mod claude;
 pub mod clock;
+pub mod devices;
+pub mod display;
 pub mod docker;
 pub mod events;
 pub mod front_app;
 pub mod home;
 pub mod lua;
 pub mod media;
+mod mixer;
 pub mod network;
 pub mod power;
+mod privacy;
 pub mod system;
 pub mod workspaces;
 
 /// The kinds `create` knows.
-pub const KINDS: &[&str] = &["audio", "claude", "clock", "docker", "events", "front_app", "home", "media", "network", "power", "system", "workspaces"];
+pub const KINDS: &[&str] = &["audio", "claude", "clock", "devices", "display", "docker", "events", "front_app", "home", "media", "network", "power", "system", "workspaces"];
 
 /// What happened, for every widget.
 pub enum Signal<'a> {
@@ -39,6 +43,11 @@ pub enum Signal<'a> {
     Shown(bool),
     /// Whether a game of `[games] apps` is in front: timers stop but the clock's.
     Game(bool),
+    /// A device came, went or changed (`WM_DEVICECHANGE` with `DBT_DEVNODES_CHANGED`), often several
+    /// times in a row: a Bluetooth device that connects, a USB headset.
+    DevicesChanged,
+    /// The screens changed: one came or went, a resolution, a refresh rate, HDR.
+    Displays,
     /// `rustybar msg trigger <name> [key=value…]`, or `rb.trigger`: for the Lua widgets that
     /// listen to it.
     Trigger { name: &'a str, args: &'a [(String, String)] },
@@ -51,6 +60,12 @@ pub trait Widget {
     /// The pill in its compact form, for a bar without room for the full one (see `fit`): None
     /// for a widget that has no other.
     fn compact(&self, _theme: &Theme) -> Option<Pill> {
+        None
+    }
+
+    /// A wider form, for a widget of the center group when the bar has room to spare for it (the
+    /// title of `media` that would be cut): None for a widget that has no other.
+    fn wide(&self, _theme: &Theme) -> Option<Pill> {
         None
     }
 
@@ -143,13 +158,15 @@ pub enum Reply {
 pub fn create(kind: &str, options: &Options) -> Option<Box<dyn Widget>> {
     match kind {
         "clock" => Some(Box::new(clock::Clock::new(options))),
-        "audio" => Some(Box::new(audio::Audio::new())),
+        "audio" => Some(Box::new(audio::Audio::new(options))),
         "claude" => Some(Box::new(claude::Claude::new(options))),
         "media" => Some(Box::new(media::Media::new(options))),
-        "network" => Some(Box::new(network::Network::new())),
+        "network" => Some(Box::new(network::Network::new(options))),
         "power" => Some(Box::new(power::Power::new())),
         "front_app" => Some(Box::new(front_app::FrontApp::new())),
         "docker" => Some(Box::new(docker::Docker::new(options))),
+        "devices" => Some(Box::new(devices::Devices::new(options))),
+        "display" => Some(Box::new(display::Display::new(options))),
         "events" => Some(Box::new(events::Events::new(options))),
         "home" => Some(Box::new(home::Home::new(options))),
         "system" => Some(Box::new(system::System::new(options))),

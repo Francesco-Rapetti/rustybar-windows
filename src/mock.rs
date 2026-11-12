@@ -40,5 +40,8 @@ mod tests {
             }
         }
         assert!(files >= 11, "{files} files");
+        // The config the settings window edits on made-up data reads as the bar's
+        let settings = std::fs::read_to_string(dir.join("settings").join("rustybar.toml")).expect("examples/mock/settings");
+        assert!(toml::from_str::<crate::config::Config>(&settings).is_ok());
     }
 }

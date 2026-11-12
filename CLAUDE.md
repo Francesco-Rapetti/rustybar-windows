@@ -159,6 +159,23 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   li disegna fuori schermo, niente dello schermo dell'utente nella foto. La barra finta:
   `RUSTYBAR_MOCK`, `RUSTYBAR_CONFIG_DIR` = `examples\mock` e `RUSTYBAR_LOCALE=en-US` (sezione
   «Made-up data» del README); log `rustybar-mock.log`.
+- La finestra delle impostazioni: le pagine si guardano con `rustybar settings --shot <pagina>
+  <file.png> [scala] [larghezza]` (fuori schermo, come `msg shot`; con `RUSTYBAR_MOCK` la config
+  finta di `examples\mock\settings`). Per provarla dal vivo senza disturbare: la cartella di una
+  barra di prova (`RUSTYBAR_CONFIG_DIR`) e `RUSTYBAR_SETTINGS_TEST=1`: la finestra va fuori da ogni
+  schermo (x = −20480) e non chiede mai il primo piano; la si guida con `PostMessage` alla classe
+  `RustyBarSettings` (coordinate client; al 100% e con la finestra di 1040 DIP il contenuto va da
+  x = 320 a 984) e si scrive nell'EDIT (classe `RustyBarSettingsEdit`, figlio `Edit`) con
+  `WM_SETTEXT` + `WM_KEYDOWN` Invio. In PowerShell `FindWindow(classe, $null)` passa `""`: serve
+  `[NullString]::Value`. Log `rustybar-settings[-<cartella>].log`. Mai provare dal vivo
+  l'interruttore «Riserva lo spazio» su una barra di prova (la fa riservare) né un campo segreto
+  fuori dai dati finti (scriverebbe nel Gestore credenziali vero). Per vedere cosa mostra la
+  finestra di prova fuori schermo: `PrintWindow` con `PW_RENDERFULLCONTENT` (2) sulla sua finestra
+  (Bitmap di `System.Drawing`), che fotografa lei sola, contenuto DirectComposition compreso; un
+  `--shot` non basta, passa da un'altra strada (`Gfx::png`). La tinta dell'hover non si vede con
+  movimenti simulati (Windows manda subito `WM_MOUSELEAVE`).
+- In questa sessione `LOCALAPPDATA` è `%USERPROFILE%\.claude-account2-localappdata`: i log delle
+  barre di prova sono lì, non nel `%LOCALAPPDATA%` vero.
 
 ## Com'è fatta
 
@@ -172,7 +189,16 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   `msg`, che aspetta fino a 5 s; niente pipe né socket da tenere in ascolto).
   Barra nascosta su ogni schermo → device rilasciati (`Gfx` a `None`), si rifanno quando una barra
   torna. Animazioni solo se il tema le vuole, Windows le ha accese, nessun gioco della lista in
-  primo piano e tutte le barre visibili.
+  primo piano e tutte le barre visibili. Config: al cambio della cartella un `wake::Timer` di
+  150 ms (`SETTLE_MS`) aspetta che le scritture finiscano, poi il timbro dice se è cambiato un
+  file (un file letto a metà, troncato da chi scrive, dava per un attimo il layout predefinito).
+  Ricarica fine (`reload`, `make_widgets`): ogni `Slot` ricorda tipo e opzioni; un widget con nome,
+  tipo e opzioni uguali resta com'è (niente letture, connessioni o processi nuovi), gli altri
+  vanno prima che arrivino i nuovi; lo stato Lua resta se nessun `.lua` è cambiato (il timbro dei
+  `.lua`), con un `.lua` cambiato si rifanno i soli widget Lua; tema e font si rifanno solo se
+  `[theme]` è cambiato, le barre solo se `[bar]`. I widget nuovi sentono `Foreground`, `Shown` e
+  `Game`; quelli tenuti solo `Game` se è cambiato. `rustybar msg reload` rifà tutto. Il log dice
+  «config reloaded: N of M widgets made again (nomi)».
 - `bar.rs`: una barra per schermo (`WS_EX_NOREDIRECTIONBITMAP`, topmost, senza attivazione),
   AppBar registrata dopo il primo frame (Explorer ci mette ~200 ms a spostare le finestre),
   `fullscreen_here` (finestra in primo piano che copre lo schermo senza barra del titolo, o
@@ -243,11 +269,16 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   thread principale: si blocca (provato); si usa `when`. `windows-core` è una dipendenza
   diretta solo perché le macro `#[implement]` e `#[interface]` lo nominano.
 - `widgets/`: un file per widget, registrato in `widgets::create` e in `KINDS`. Il trait `Widget`
-  ha `pill`, `handle` (un handle da aspettare) o `handles` (più d'uno: un evento e un timer) con
-  `signaled`/`signaled_at`, ed `event` (`Signal`: `Foreground`, `Resume`, `TimeChanged`,
-  `Shown`, `Game` = un gioco della lista in primo piano); dicono se ciò che il widget mostra è
-  cambiato (la pill, o il popup aperto). Nella pill `Item::icon` (Segoe Fluent Icons); nei popup
-  `Shape::Image`, `Scene::slider`, `Input::Slide`/`Release`, testi tagliati coi puntini.
+  ha `pill`, `compact`, `wide` (la forma larga del gruppo centrale), `handle` (un handle da
+  aspettare) o `handles` (più d'uno: un evento e un timer) con `signaled`/`signaled_at`
+  (meglio riconoscere l'handle che contare gli indici: l'elenco cambia con ciò che gira), ed
+  `event` (`Signal`: `Foreground`, `Resume`, `TimeChanged`, `Shown`, `Game` = un gioco della
+  lista in primo piano, `DevicesChanged` = `DBT_DEVNODES_CHANGED`, `Displays` = schermi cambiati,
+  `Trigger`); dicono se ciò che il widget mostra è cambiato (la pill, o il popup aperto). Nella
+  pill `Item::icon` (Segoe Fluent Icons) e `Item::image` (una figura quadrata: la copertina); nei
+  popup `Shape::Image`, `Scene::slider`, `Input::Slide`/`Release`, testi tagliati coi puntini.
+  Moduli d'aiuto in `widgets/`: `mixer.rs` (il mixer di `audio`), `privacy.rs` (microfono e
+  fotocamera in uso). Fuori: `crash.rs` (il motivo di un crash nel log e la ripartenza).
 
 ## Decisioni (con l'utente, 10/11/2026)
 
@@ -505,7 +536,7 @@ in quest'ordine (le piccole prima, Lua e impostazioni per ultime):
    Calendar: Windows non ha un calendario leggibile da un'app non pacchettizzata), 7. `docker`
    (Engine API sulla named pipe di Docker Desktop) (fatti).
 8. Dati finti (`RUSTYBAR_MOCK`) e screenshot dei popup nel README (fatto, sotto).
-9. Widget in Lua (fatto, sotto), 10. finestra delle impostazioni (in un processo suo).
+9. Widget in Lua (fatto, sotto), 10. finestra delle impostazioni (in un processo suo; fatta, sotto).
 
 Lasciati fuori: `aerospace` (niente tiling WM per decisione), `battery` (questo PC non ha una
 batteria per provarlo), `notifications` (badge della taskbar e aggiornamenti alla brew non hanno
@@ -552,9 +583,10 @@ decisione) e il Wi-Fi acceso e spento, di `audio` il collegamento dei dispositiv
   su questo PC» (`ms-settings:about`) | «Gestione attività» Ctrl+Maiusc+Esc (`taskmgr.exe`),
   «Impostazioni» Win+I (`ms-settings:`) | «Sospendi» (`SetSuspendState` su un thread dopo 0,3 s:
   Windows avvisa tutte le finestre e la chiamata torna al risveglio), «Riavvia il sistema»,
-  «Arresta il sistema» | «Blocca» Win+L (`LockWorkStation`), «Disconnetti <nome>» | «Config di
-  RustyBar…» (apre `rustybar.toml` con l'app di Windows o il Blocco note, scrivendo l'esempio se
-  manca; la finestra delle impostazioni la sostituirà). Riavvia, Arresta e Disconnetti al
+  «Arresta il sistema» | «Blocca» Win+L (`LockWorkStation`), «Disconnetti <nome>» |
+  «Impostazioni di RustyBar…» (lancia `rustybar settings`, un processo suo fuori dal job dei
+  figli, dopo `AllowSetForegroundWindow`; prima era «Config di RustyBar…», che apriva il file, ora
+  nella pagina Informazioni). Riavvia, Arresta e Disconnetti al
   secondo clic (la riga in rosso: «Fai clic di nuovo per arrestare»), con `ExitWindowsEx` come
   Start (le app possono dire che sono occupate): `EWX_REBOOT`, `EWX_SHUTDOWN | EWX_POWEROFF` più
   `EWX_HYBRID_SHUTDOWN` se `HiberbootEnabled` (avvio rapido), più `EWX_RESTARTAPPS` se
@@ -731,6 +763,288 @@ da una sonda e confermata così com'era):
   `widgets\` e `widgets\lib\`); `rustybar check` li carica e dice gli errori e i nomi Lua.
   `examples/widgets`: `pomodoro.lua` (senza rete, timer solo mentre conta) e `weather.lua`
   (Open-Meteo con `rb.http` e `rb.json`, ogni 15 minuti).
+
+Decisioni (con l'utente, 12/11/2026, per la finestra delle impostazioni; specifica proposta con i
+costi misurati e confermata con le scelte consigliate):
+
+- **Processo**: lo stesso eseguibile, `rustybar settings [pagina]`, in un processo suo che finisce
+  quando la finestra si chiude (la barra non ne porta niente, 0 a riposo). Una sola finestra per
+  cartella di config: un secondo `rustybar settings` la porta davanti sulla pagina chiesta. Si apre
+  dal menu di `power` («Impostazioni di RustyBar…» al posto di «Config di RustyBar…»; il file resta
+  raggiungibile dalla pagina Informazioni), da riga di comando e dal collegamento «Impostazioni di
+  RustyBar» nel menu Start (scritto e tolto da `rustybar install`/`uninstall`).
+- **Toolkit (A)**: il disegno dei popup (Direct2D e DirectWrite su DirectComposition, WARP), in
+  stile Impostazioni di Windows 11: pagine a sinistra, schede arrotondate di righe con titolo,
+  descrizione e controllo a destra, coi colori del tema della barra (chiaro, scuro, accento).
+  Controlli nostri: interruttore, menu a tendina, numero con − +, cursore, colore, elenco di testi,
+  editor del layout; lo scorrimento sposta un visual (DWM, niente ridisegno). I campi di testo sono
+  un EDIT nativo sopra il campo mentre lo si modifica (IME, appunti, annulla, menu: di Windows).
+  Niente accessibilità UI Automation fuori dai campi di testo. Esclusi i controlli comuni di Win32
+  (aspetto da Windows 10, tema scuro incompleto) e WebView2.
+- **Pagine**: Barra (altezza, margine, riserva, distanza dei popup; i giochi), Tema (palette coi
+  campioni, colore principale, font da DirectWrite, misure, animazioni, colori sovrascritti),
+  Layout (le tre colonne coi chip da trascinare, ×, «+ Aggiungi»: i tipi non ancora nella barra,
+  un'altra istanza di un tipo, i widget Lua di `widgets\`), una pagina per widget del layout (uno
+  schema di opzioni per tipo; i segreti nel Gestore credenziali da un campo nascosto, mai nei file;
+  per un widget Lua le chiavi che ha e «Aggiungi opzione»), Informazioni (versione, cartelle,
+  «Apri rustybar.toml», gli errori di `rustybar check` in cima).
+- **Scrittura**: `toml_edit` (+~104 KB, condivide il parser di `toml`), sul posto, commenti e
+  ordine tenuti; ogni modifica si scrive subito (niente Salva), i campi di testo a Invio o
+  all'uscita dal campo; il file si rilegge prima se è cambiato da fuori; le chiavi stanno dove sono
+  (`rustybar.local.toml` o `rustybar.toml`), il nuovo va in `rustybar.toml` salvo dentro una
+  tabella del file locale; un valore rimesso al predefinito sparisce; un file che non si legge si
+  mostra e non si scrive finché non è a posto. La barra si ricarica da sola (il suo watcher).
+- **Ricarica più fine della barra**: alla ricarica si tengono i widget il cui tipo e le cui opzioni
+  non sono cambiati (e lo stato Lua se nessun `.lua` è cambiato); si rifanno solo gli altri. Così
+  un clic nella finestra non rilancia `claude.exe`, non riconnette Home Assistant, non rilegge
+  Docker e i calendari.
+- **Lavoro in tre fasi**, ognuna provata prima della successiva: (1) ricarica fine, finestra,
+  controlli, pagine Barra, Tema, Layout, Informazioni e scrittura; (2) le pagine dei widget con gli
+  schemi e i segreti; (3) `RUSTYBAR_MOCK` (copie in `examples/mock/settings/`, niente applicato) e
+  `rustybar settings --shot <pagina> <file.png>` fuori schermo per il README.
+- Fuori (solo macOS): AeroSpace, JankyBorders, SwipeAeroSpace, MiddleClick, Brewfile.
+
+- Finestra delle impostazioni (fatta, 12/11/2026, come le decisioni sopra), `src/settings/`:
+  `mod.rs` è il processo e la finestra: `rustybar settings [pagina]` (`bar`, `theme`, `layout`,
+  `about`, o il nome di un widget del layout: `w:<nome>`); un mutex per cartella di config
+  (`Local\RustyBar-settings-<hash>`), la finestra ha la proprietà `RustyBarDir` con lo stesso hash:
+  un secondo processo la trova con `EnumWindows`, le manda la pagina con `WM_COPYDATA` (la firma
+  `RBM1` di `ipc`) dopo `AllowSetForegroundWindow` ed esce. `process::setup` come la barra
+  (sotto il normale, EcoQoS). Finestra `WS_OVERLAPPEDWINDOW` + `WS_EX_NOREDIRECTIONBITMAP`, 1040×760
+  DIP al centro dello schermo col mouse, minimo 760×520; barra del titolo nei colori della pagina
+  (`DwmSetWindowAttribute` 20, 35, 36: scuro, colore del titolo e del testo). Albero
+  DirectComposition: sfondo (una superficie di 1 pixel scalata), barra laterale, pagina sotto un
+  clip (scorre con `SetOffsetY` e un'ease-out di 0,16 s eseguita da DWM; il cursore della barra di
+  scorrimento è un visual che si trascina), menu, tinta dell'hover (nel visual della sua parte,
+  così scorre con la pagina), il chip trascinato e la linea dove cadrebbe. Eventi in coda come
+  nella barra, gestiti subito anche dentro il ciclo modale del ridimensionamento. Dopo ogni
+  modifica la pagina si rifà dalla config e si ridisegna solo dove la scena è cambiata
+  (`changed_region`, `BeginDraw` col rettangolo, clip): un clic su un interruttore ridisegna
+  l'interruttore. Il menu a tendina è un riquadro nella finestra con 12 righe visibili (si
+  ridisegnano alla rotella: l'elenco dei font ne ha centinaia), tastiera e lettera iniziale.
+  `edit.rs`: l'EDIT di Windows in una finestrella `WS_POPUP` di proprietà della finestra, sopra il
+  campo, nei suoi colori (`WM_CTLCOLOREDIT`), col font Segoe UI Variable; sottoclassato per
+  Invio, Tab, Esc e rotella; `EN_KILLFOCUS` tiene il testo; la barra del titolo resta attiva
+  mentre l'EDIT ha la tastiera (`WM_NCACTIVATE`). `form.rs`: `Form` costruisce una `Page` (scena +
+  `Do` per zona: `Run`, `Menu`, `Field`, `Slide` con l'anteprima mentre si trascina, `Chip`) con
+  righe e controlli in stile Windows 11 (`Look` dai colori del tema: schede un tono sopra lo
+  sfondo); `go`/`open` per cambiare pagina o aprire un file; `confirmed` per il secondo clic.
+  `pages.rs`: barra laterale (la sezione Widget coi widget del layout; scorre con la rotella se la
+  finestra è bassa) e le pagine Barra, Tema, Layout, Informazioni; `schema.rs`: la pagina di ogni
+  widget (dove sta, o «Non nella barra»; un'istanza in più si elimina al secondo clic) con lo
+  schema del suo tipo: `clock` (date, timezone, open), `workspaces` (single), `media` (paused,
+  cover, cover_colors), `system` (interval, gpu, soglie a cursore), `claude` (dir, color, path,
+  soglie), `home` (server, token, plancia, gruppi di tessere come chip, stampante), `events` (i
+  calendari a due piani: nome che sposta anche il segreto, colore, indirizzo segreto, cestino;
+  soglie, interval, open), `docker` (la pipe); le chiavi che lo schema non conosce, e tutte quelle
+  di un widget Lua, per tipo del valore, con «Aggiungi un'opzione» (`chiave = valore` in TOML, o
+  testo). Segreti: `secret::set`/`delete` (`home-assistant`, `events-<nome>`), con i dati finti un
+  insieme in memoria. `store.rs` (da quello della versione macOS): letture fuse, scritture sul
+  posto senza mai lasciare il file vuoto (`write_in_place`: niente rinomina, un link resta un
+  link), `push_table` anche dentro un array scritto in linea. Con `RUSTYBAR_MOCK` il processo mette
+  `RUSTYBAR_CONFIG_DIR` su `<mock>\settings` all'avvio: config, `check`, Lua e log seguono quella.
+
+## Nuove proposte (decise con l'utente il 12/11/2026)
+
+Confrontata di nuovo la versione macOS (`ede268a`) e misurato con una sonda di sole letture
+(con WoW aperto); la nota completa coi costi è nelle note condivise della sessione
+(`proposte-2026-11-12.md`). L'utente: «fai tutto nell'ordine che ritieni corretto». Per le scelte
+lasciate aperte valgono quelle consigliate: soglie della temperatura della GPU 85/95 °C se il
+driver non le dice, la copertina nella pill come opzione spenta, il ping verso l'esterno come
+opzione spenta. Ordine: le piccole prima.
+
+1. **Crash** (fatto, `crash.rs`): `panic::set_hook` scrive thread, file, riga e messaggio nel log
+   (`log::write_failing`, con `try_lock`: il thread che fallisce può avere il lock) e rilancia la
+   barra con gli stessi argomenti; un fault in una chiamata di Windows passa da
+   `SetUnhandledExceptionFilter` (codice e `rustybar+offset`; non rilancia dopo uno stack
+   overflow). Il nuovo processo riceve `RUSTYBAR_AFTER` (il pid da aspettare, fino a 5 s, prima
+   del mutex; tolto dall'ambiente) e `RUSTYBAR_RESTARTS` (gli orari delle ripartenze): al massimo
+   3 in 10 minuti. La finestra delle impostazioni scrive il motivo e non riparte. Non
+   `RegisterApplicationRestart` (solo dopo 60 s, e Segnalazione errori può mostrare una finestra
+   che ruba il primo piano). Per provarlo: `RUSTYBAR_TEST_CRASH=1` nella barra di prova, poi
+   `rustybar msg crash` (senza la variabile il comando non esiste). Provato: ripartita in ~110 ms
+   tre volte, alla quarta «failed 3 times in 10 minutes». Non provato: lo spazio riservato da
+   una barra morta che aveva `reserve = true`.
+2. **Nomi sbagliati** (fatto): `config::closest` (distanza di Levenshtein fino a un terzo delle
+   lettere, o un prefisso di almeno 4) in `rustybar check` (`unknown widget "sistem" in [layout]
+   (maybe "system"?)`), nel log e nella pagina Layout (il chip rosso «sistem» con «→ system»
+   nell'accento, che lo sostituisce; provato con `settings --shot layout`).
+3. **`system`, la GPU** (fatto): soglie della temperatura in °C (`temp_warning`, `temp_critical`;
+   senza, 10° sotto quella che il driver dice alta e quella, altrimenti 85 e 95: la Radeon
+   di qui dice `TemperatureWarning = 0`, e prima la temperatura non cambiava mai colore); nel
+   popup accanto a «GPU» temperatura e ventola (`2274 rpm`, «ventola ferma» a 0 giri con un
+   massimo noto), accanto al valore la frequenza del core, nella memoria video quella della
+   memoria. `Gpu::perf` (`ADAPTERPERFDATA`, la chiamata della temperatura: temperatura, ventola,
+   memoria) e `Gpu::clock` (`NODEPERFDATA` del motore 3D, ~0,28 ms nel driver: solo a popup
+   aperto, all'apertura e ogni 2 s). Il campo `Power` no: decimi di percento di cosa, non è lo
+   stesso per ogni driver (qui 193 sotto carico). Nella pagina del widget le due soglie. Provato:
+   barra di prova con un gioco aperto, GPU al 98%, 88 °C in giallo, 2274 rpm, 1666 MHz, memoria
+   1796 MHz; dati finti (`clock`, `memory_clock`, `fan`, `fan_max` in `system.json`).
+4. **`audio`, il microfono** (fatto): nella pill (e nella compatta) il microfono barrato rosso se
+   l'ingresso predefinito è muto, altrimenti il microfono in `primary` se un'app lo usa, e la
+   fotocamera (`E714`) se un'app la usa; nel popup sotto i volumi «Microfono in uso da Discord».
+   `widgets/privacy.rs`: le chiavi `ConsentStore\microphone` e `\webcam` di HKCU (una per app
+   pacchettizzata, il nome dalla famiglia del pacchetto; una per eseguibile sotto
+   `NonPackaged`, il percorso con `#`, il nome dalla versione come `front_app`), in uso con
+   `LastUsedTimeStart > 0` e `LastUsedTimeStop = 0`; ognuna con `RegNotifyChangeKeyValue`
+   (albero, `LAST_SET | NAME | THREAD_AGNOSTIC`) su un evento suo, riarmato solo quello che è
+   scattato (riarmarne uno ancora in attesa ne aggiungerebbe un altro). Aperte con le callback
+   di Core Audio a barra visibile, chiuse senza. `privacy = false` le toglie. `signaled_at`
+   riconosce l'handle (evento, timer della batteria, i due del registro) invece dell'indice.
+   Misurato: barra di prova con `audio`, a riposo per 30 s, 4,3 MB privati, 0 ms di CPU,
+   0,10 risvegli/s, 6 thread. Non provato: un'app che usa davvero il microfono (qui nessun
+   ingresso attivo) e la fotocamera.
+5. **`power`** (fatto): mentre Windows Update aspetta un riavvio (la sottochiave `RebootRequired`
+   di `HKLM\…\WindowsUpdate\Auto Update`) un puntino `●` in `peach` accanto al logo, piccolo, e
+   in cima al menu «Riavvia per completare gli aggiornamenti» (`E895`, apre
+   `ms-settings:windowsupdate`). `RegNotifyChangeKeyValue` sulla sola chiave e sui soli nomi
+   delle sottochiavi (i valori che Windows Update riscrive non svegliano), chiusa senza barre
+   visibili. Dati finti: `update` in `power.json`. Provato coi dati finti; sulla barra di prova
+   la chiave si apre e la sorveglianza parte senza errori. Non visto: la sottochiave che compare
+   davvero (qui non c'è un aggiornamento in attesa).
+6. **`network`** (fatto): `ping = "<host>"`, spento di predefinito: a popup aperto la riga «Ping»
+   nei dettagli (si copia come le altre), un secondo `Ping` ICMP come quello al router, il primo
+   appena l'indirizzo c'è e poi ogni 5 s. Un IPv4 subito, un nome risolto una volta su un thread
+   suo (`ToSocketAddrs`, il primo IPv4) e tenuto per i popup dopo. `handles`/`signaled_at`
+   riconoscono l'handle (timer, ping al router, ping all'host). Nella pagina del widget «Ping
+   verso». Dati finti: `host_ping` in `network.json`, `ping = "1.1.1.1"` nella config finta.
+   Provato: `one.one.one.one` dalla barra di prova, 12 ms.
+7. **`media`** (fatto): (a) l'album (`AlbumTitle`) nel popup, fra artista e app (quattro righe
+   nell'altezza della copertina; tre senza album). (b) Il titolo nello spazio libero:
+   `Widget::wide` (una forma più larga, per i widget del gruppo centrale; `media` taglia il
+   titolo a 520 e l'artista a 320 invece di 240 e 160), misurata solo se più larga della piena
+   (in cache come `nome\0wide`); `widen` in `app.rs` la usa quando nessuna pill ha ceduto e i
+   lati entrano accanto al centro largo, con `SLACK` la prima volta (`Fitted::center_wide`).
+   Provato coi dati finti e un titolo lungo stringendo col margine: 656 px larga, 401 piena col
+   margine a 900, 156 compatta più stretta, e di nuovo larga. (c) `pill_cover = true` (spenta):
+   `Item::image` (una figura quadrata nella pill, disegnata con `popup::draw_image` nella barra
+   e nel popup ⋯, nella firma del testo col suo id) al posto di ♪ mentre suona (in pausa il
+   segno della pausa); la copertina a 40 px decodificata a ogni brano sul thread del pool dove
+   arrivano le proprietà (`Shared::small_cover`, col numero di sessione). Misurato col player
+   finto: +0,2 MB privati, +3,7 MB di working set condiviso (WIC), 8 thread invece di 6 (il pool,
+   che si svuota da solo); per questo spenta. Nella pagina del widget «Copertina nella pill».
+   Dati finti: `album`, e `pill_cover = true` nella config finta.
+8. **Mixer nel popup di `audio`** (fatto, `widgets/mixer.rs`): sotto i volumi «App», le sessioni
+   dell'uscita predefinita non scadute raggruppate per eseguibile (nome dalla versione;
+   «Suoni di sistema» in fondo; un processo che non si apre col nome della sessione se è un
+   nome, altrimenti fuori), per nome, al massimo 8; riga con l'altoparlante (clic = muto), nome
+   (grigio se non suona), cursore (`app-volume:i`) e percentuale; impostate tutte le sessioni,
+   lette dalla prima. Solo a popup aperto: `IAudioSessionManager2` dell'uscita,
+   `IAudioSessionNotification` per le nuove (dopo un primo `GetSessionEnumerator`, come vuole
+   Core Audio), `IAudioSessionEvents` per volume, stato e fine; flag ed evento del widget. Al
+   cambio dell'uscita predefinita si rifà. `mixer = false` lo toglie. Dati finti: `apps` in
+   `audio.json`. Provato: sulla barra di prova le app vere (un gioco, i launcher, i suoni di
+   sistema). Non provati dal vivo: i cursori e il muto delle app (cambierebbero i volumi).
+9. **Widget `devices`** (fatto, `widgets/devices.rs`, fuori dal layout predefinito): le batterie
+   dei dispositivi Bluetooth. Ogni nodo presente di `BTHENUM`/`BTHHFENUM`/`BTHLE`/`BTHLEDEVICE`
+   con la proprietà della batteria (quella di `audio`, `{104EA319…} 2`), uno per contenitore
+   (`DEVPKEY_Device_ContainerId`); dal nodo del dispositivo dello stesso contenitore (`…\Dev_…`)
+   il nome (il nodo del profilo si chiama «… Hands-Free HF»), il tipo
+   (`DEVPKEY_DeviceDisplay_Category`, `{78C34FC8…} 90`: `Input.Keyboard`,
+   `Communication.Phone`, `Communication.Headset.Bluetooth`… → l'icona) e se è collegato
+   (`DN_DEVICE_DISCONNECTED` = `0x02000000` nello stato: c'è anche coi dispositivi abbinati ma
+   lontani, spenti o sul loro ricevitore 2,4 GHz). Pill solo con un collegato a `low` (20) o
+   meno, `always = true` tutti i collegati: icona del tipo, batteria e percentuale (gialla al
+   20%, rossa al 10%, i colori di `audio`); compatta senza numeri. Popup (300 DIP): «Dispositivi
+   Bluetooth», collegati prima e in grassetto, gli altri grigi con «Non collegato» sotto il nome
+   e l'ultimo livello; «Impostazioni Bluetooth» (`ms-settings:bluetooth`). Letture: tutti i nodi
+   (~10 ms per 75) all'avvio, all'apertura del popup, al risveglio, quando una barra torna e un
+   secondo dopo l'ultimo `WM_DEVICECHANGE` con `DBT_DEVNODES_CHANGED` (nuovo `Signal::
+   DevicesChanged` dalla finestra di controllo; un `wake::Timer` usa e getta, fermato e
+   rifatto); i nodi noti ogni 5 minuti solo con una barra visibile, nessun gioco della lista e
+   almeno un dispositivo. Opzioni nella pagina del widget («Nella barra da», «Sempre nella
+   barra»). Dati finti: `devices.json`, nella barra finta. Provato qui: cinque dispositivi
+   trovati coi nomi e i tipi giusti (cuffie, due tastiere, due telefoni), tutti non collegati;
+   barra di prova a riposo per 30 s: 3,7 MB privati, 0 ms di CPU, 0,13 risvegli/s. Non visto: un
+   dispositivo che si collega (la pill che compare, il giro dopo `WM_DEVICECHANGE`), un mouse e
+   un controller veri.
+10. **Per schermo** (fatto): `[bar] screens` (`all`, predefinito, o `primary`: `monitors()` dice
+    anche quale è il principale, `MONITORINFOF_PRIMARY`, e `build_bars` salta gli altri; un
+    valore diverso è un errore di `rustybar check`) e `[bar] always_compact` (i widget nominati
+    nella forma compatta su ogni schermo: `App::always_compact` sostituisce la loro pill piena
+    con la compatta prima di `fit`, in cache come `nome\0compact`; `msg query` non li dice
+    compatti). Nella pagina Barra «Schermi» (menu) e «Sempre compatti» (elenco). Provato:
+    `always_compact = ["system"]` dà la pill di 80 px invece di 246, tolto torna piena. Non
+    provato: `primary` con due schermi accesi (qui l'altro è spento).
+11. **Lua** (fatto): `rb.home` come su macOS: `state(id)` → `{ state, attributes, name }` o
+    `nil`, `online()`, `call(dominio, servizio, { entity_id = … })` → `true` se c'è il widget
+    `home` (che lo manda come i servizi delle tessere, `POST /api/services`; coi dati finti
+    niente), e l'evento `home_assistant` (`args.entity`, `args.state`; senza argomenti quando
+    torna in linea), da `app::Event::Trigger` come `rb.trigger`. In `home.rs` un `Bridge` in un
+    `thread_local` (thread principale): `present`, `online`, gli stati seguiti, le chiamate in
+    coda e l'evento del widget; `publish` dopo ogni evento della WebSocket e alla caduta, il
+    `Drop` di `Home` lo svuota. `[widgets.home] watch = [...]`: entità seguite oltre a tessere e
+    stampante, per i widget Lua. `lua::to_json` (tabella 1…n → array, altre → oggetto). Nel
+    popup `rb.ui.toggle` (etichetta e interruttore stile Windows 11, `on`, `on_change(valore)`
+    come lo slider, zona `t:<n>`) e `rb.ui.disclosure` (nel preludio Lua: riga col titolo e il
+    chevron `E70D`/`E76C` a destra, i pezzi solo con `open`, `on_click` per il widget, come su
+    macOS). Riga con icona (`row` con `rb.ui.icon`) e griglia a n colonne (`tiles { columns }`)
+    c'erano già. `examples/widgets/lights.lua`: le luci scelte con un interruttore ciascuna,
+    senza timer (ascolta `home_assistant`). Test: interruttore e sezione, `rb.home` senza `home`,
+    il ponte con gli stati. Provato sulla barra finta: pill «lampadina 2», popup con tre
+    interruttori. Non provati: un Home Assistant vero (`call` vero, l'evento dal vivo).
+12. **Impostazioni di Home Assistant** (fatto, `schema::home`): per ogni gruppo il titolo con ↑ ↓
+    e «Togli»; ogni tessera su una riga (l'id, sotto il nome del server se caricato) con «nome
+    suo», «icona», ↑ ↓ e il cestino (`put_tile`: l'id da solo, o una tabella in linea `{ id,
+    name, icon }`); «Aggiungi una tessera» col menu «Dal server…» (solo i domini che una tessera
+    mostra) e l'id a mano; «Entità del server»: «Carica»/«Ricarica» chiede `GET /api/states` col
+    token su un thread di lavoro (con i dati finti gli stati di `home.json`), poi
+    `settings::refresh` (un `PostMessage` di `WM_APP + 1` alla finestra, `Ev::Refresh`) rifà la
+    pagina; l'elenco resta finché la finestra è aperta. «Per i widget Lua»: `watch` (elenco e
+    menu). `store::swap` (`swap_in`) scambia due elementi di un array o di un `[[…]]`: ogni posto
+    tiene spazi e commenti, le tabelle si scambiano anche la posizione nel file (test).
+    `Control::Gap` tiene il posto della freccia che una riga non ha, così i controlli restano in
+    colonna. Provato dal vivo con la finestra di prova fuori schermo su una copia dei dati finti:
+    «Carica» → «13 entities», ↓ sulla prima tessera la scambia con la seconda nel file. Nota per
+    le prove: `FindWindow("RustyBarSettings")` può trovare la finestra vera dell'utente se è
+    aperta: cercare quella di prova per titolo («… (made-up data)») o controllare prima che non
+    ce ne sia un'altra (questa volta quella dell'utente era chiusa dalle 19:15). Non provati: la
+    scelta dal menu «Dal server…» (il menu si apre come gli altri), un server vero.
+13. **Widget `display`** (fatto, `widgets/display.rs`, fuori dal layout predefinito): pill con
+    l'icona dello schermo, la frequenza del principale (la sorgente in 0, 0) e «HDR» se acceso;
+    compatta la sola frequenza. Popup (320 DIP): un riquadro per schermo con nome
+    (`monitorFriendlyDeviceName`) e risoluzione, «Frequenza di aggiornamento» come chip (le
+    frequenze di `EnumDisplaySettingsW` alla risoluzione attuale, quattro per riga; clic →
+    `ChangeDisplaySettingsExW` con `CDS_UPDATEREGISTRY`), HDR con l'interruttore se lo schermo
+    lo supporta (lo stato HDR di 24H2, `GET_ADVANCED_COLOR_INFO_2` = 15 e `SET_HDR_STATE` = 16,
+    strutture scritte a mano perché windows-rs non le ha; prima di 24H2 lo stato del colore
+    avanzato, 9 e 10), la luminosità via DDC/CI col cursore (inviata al rilascio, su un thread);
+    «Impostazioni dello schermo». La configurazione (`QueryDisplayConfig` e i nomi) all'avvio e a
+    `Signal::Displays` (nuovo: l'app lo manda dopo aver rifatto le barre per `WM_DISPLAYCHANGE`)
+    e al risveglio; frequenze e luminosità solo all'apertura del popup, la luminosità su un thread
+    di lavoro (`GetMonitorBrightness` per monitor fisico, il risultato con l'evento del widget).
+    `brightness = false` la toglie. A riposo niente: nessun timer né thread. Dati finti
+    `display.json` (nella barra finta). Provato in sola lettura sui due schermi di qui: nomi,
+    risoluzioni, frequenze (60/120/240 e otto per il secondo), HDR acceso sul principale e
+    spento sul secondo (lo stato di 24H2 risponde), luminosità di 2 monitor in 120–126 ms. Non
+    provati, perché cambierebbero gli schermi: il cambio di frequenza, HDR acceso e spento, la
+    luminosità scritta; e se `WM_DISPLAYCHANGE` arriva al cambio di HDR.
+14. **Giro di prove** (fatto) dei «non provati» fattibili da qui:
+    - Avvio all'accesso: confermato dal log vero e dall'evento 7001 (il 12/11 accesso alle
+      10:13:07, barra alle 10:13:50); il collegamento «Impostazioni di RustyBar» c'è nel menu Start.
+    - Tema chiaro: tutti i popup della barra finta con `catppuccin-latte`, si leggono (i nuovi
+      compresi: mixer, batterie, schermi, Windows Update, ventola della GPU).
+    - Scale 125/150/200%: le pill di sinistra (logo, puntino, desktop, schermi) nitide.
+    - Un widget Lua nel ⋯ (margine 2500): si vede e funziona come gli altri.
+    - `rb.exec` in timeout: trovato e corretto un difetto. Il timeout uccideva solo `cmd.exe`; il
+      `ping` che aveva lanciato teneva aperte le pipe e la risposta arrivava a 44 s invece di 30.
+      Ora `process::run` mette ogni comando anche in un job suo, annidato in quello globale, e
+      allo scadere fa `TerminateJobObject` di quello: risposta a 30 s, nessun processo rimasto
+      (vale anche per `claude`).
+    - `claude.exe` appeso (un eseguibile di prova che dorme): timeout a 20 s, nessun processo
+      rimasto. Trovato e corretto: senza risposta la pill diceva «✻ Accedi» come senza account;
+      ora `✻ –`, e il popup «Claude Code non ha risposto: riprova all'apertura del popup».
+    - Non fatti da qui: i clic sui popup finti aperti sullo schermo (coprirebbero lo schermo
+      mentre l'utente gioca); coperti dai percorsi di codice e dai test.
+
+    Da provare con l'utente (solo lui può, o cambierebbe il PC): la finestra delle impostazioni
+    col mouse vero (hover, menu, campo di testo, trascinamento, il menu «Dal server…» di Home
+    Assistant); un secondo desktop virtuale (`workspaces`); «Disinstalla» da Impostazioni > App;
+    un cambio di DPI e del tema chiaro/scuro di Windows al volo; HDR acceso e spento e un cambio
+    di frequenza da `display` (e se arriva `WM_DISPLAYCHANGE`); la luminosità scritta via
+    DDC/CI; un dispositivo Bluetooth che si collega (`devices`); un'app che usa il microfono o
+    la fotocamera (`audio`); i cursori del mixer su app vere; un crash della barra installata
+    con `reserve = true` (lo spazio riservato che resta); `screens = "primary"` con due schermi.
 
 ## Domande aperte (da decidere con l'utente)
 
@@ -984,3 +1298,54 @@ da una sonda e confermata così com'era):
   gli script: 1–6 ms; primo frame 36–46 ms. Binario ~2,66 MB (+0,73 MB: Lua e il suo codice).
   Non provati: un clic vero col mouse nei popup Lua (coperti dai test di `popup_input`), un
   `rb.exec` lungo che va in timeout, il tema chiaro, un widget Lua dentro il ⋯.
+- 12/11/2026, **finestra delle impostazioni** (punto 10; decisioni e com'è fatta in «Dalla
+  versione macOS»), in tre fasi. Fase 1, ricarica fine: barra di prova con `claude`, `home` (senza
+  token), `system`, `clock`, `power` e un widget Lua; cambiato il formato di `clock` si rifà solo
+  `clock`, margine e tema non rifanno nessun widget (`home` non riconnette, `claude` non riparte),
+  un `.lua` cambiato rifà solo il widget Lua, `msg reload` rifà tutto. Trovato provando: la barra
+  leggeva il file troncato da `fs::write` e per un attimo caricava il layout predefinito; ora la
+  finestra scrive senza mai svuotarlo e la barra aspetta 150 ms dopo il cambio. Finestra di prova
+  fuori schermo e senza primo piano (`RUSTYBAR_SETTINGS_TEST`) guidata con messaggi: − e + (un
+  valore rimesso al predefinito sparisce), interruttore, menu a tendina da tastiera (palette),
+  campo di testo (un gioco aggiunto in una tabella `[games]` nuova), trascinamento di un chip fra
+  le colonne (una sola ricarica), «+ Aggiungi» un'altra istanza (`system_2` con `type`), ×,
+  cursore (una scrittura al rilascio, si rifà solo `system`), «Aggiungi un'opzione» di un widget
+  Lua, il segreto coi dati finti (né il Gestore credenziali né il file toccati). Mio errore
+  durante le prove: un secondo clic sull'interruttore «Riserva lo spazio» ha fatto riservare la
+  striscia alla barra di prova per ~1,7 s (17:00:07–09), con le finestre ingrandite che possono
+  essersi spostate e tornate; l'utente giocava a WoW (il log della barra di prova lo dice in primo
+  piano). Misure: barra di prova a riposo per 60 s dopo la fase 1 4,7 MB privati, 7,6 MB
+  committed, 16 ms di CPU, 0,10 risvegli/s, 5 thread, 0 figli; finestra aperta (Tema, o Home
+  Assistant coi dati finti) 7,5–8,1 MB privati, 12 MB committed, 0 ms di CPU in 20 s,
+  0,10 risvegli/s, 6 thread, 0 figli; ~4,7 ms di CPU per modifica (10 clic su +: 47 ms); finestra
+  mostrata 34–43 ms dopo l'avvio. Binario 3,11 MB (+0,45 MB: `toml_edit` e la finestra). Test: 78
+  (10 nuovi: store sul posto e nei due file, numeri, secondo clic, regione cambiata, opzioni
+  scritte a mano, la config finta della finestra). Screenshot in inglese fatti con `--shot`:
+  `settings-layout.png`, `settings-home.png`, e `power.png` di nuovo (dice «RustyBar settings…»).
+  Non provati: la finestra davanti con un mouse vero (hover, cursore a I, menu col mouse, EDIT che
+  prende la tastiera e la barra del titolo che resta attiva, rotella, trascinamento del cursore
+  della barra di scorrimento), il cambio di DPI, il tema chiaro e scuro al volo di Windows, il
+  primo piano preso quando un secondo `rustybar settings` la richiama (provato che le passa la
+  pagina ed esce in 70 ms, lasciando un processo solo), il collegamento nel menu Start (serve
+  `rustybar install`), un segreto vero.
+- 12/11/2026, **finestra vuota** (vista dall'utente dopo l'installazione: solo lo sfondo): i
+  visual erano aggiunti con `AddVisual(v, true, None)`, che senza visual di riferimento mette il
+  nuovo *sotto* i fratelli (`false` lo mette sopra): lo sfondo, aggiunto per primo con `false`,
+  copriva barra laterale, pagina, menu, chip trascinato. Nelle prove non si vedeva (finestra fuori
+  schermo, screenshot con `--shot`). Ora tutti con `false`, nell'ordine in cui vanno; controllato
+  con `PrintWindow` sulla finestra di prova: pagina, barra laterale, barra di scorrimento e menu
+  a tendina sopra la pagina. `rustybar install` e `uninstall` chiudono anche le finestre delle
+  impostazioni aperte (`close_settings`, `WM_CLOSE` come la X): girano dallo stesso eseguibile, che
+  finché è in uso non si può sostituire.
+- 12/11/2026, **nuove proposte** (le 14 della sezione «Nuove proposte», fatte nell'ordine scelto:
+  crash, nomi, GPU, microfono e mixer, Windows Update, ping, `media`, `devices`, per schermo,
+  Lua, Home Assistant, `display`, giro di prove). Ognuna con build, clippy senza avvisi e test
+  (87, più 3 ignorati), provata coi dati finti e dove si poteva su una barra di prova
+  (`reserve = false`) o con la finestra delle impostazioni di prova; i dettagli e cosa non è
+  provato sotto ogni punto. Screenshot del README rifatti dalla barra finta (`audio`, `system`,
+  `network`, `media`, `power`, le due estremità della barra, `settings-home`) e due nuovi
+  (`devices`, `display`). Misura finale, barra di prova col layout predefinito, due schermi
+  accesi e un gioco che fa lavorare la GPU, a riposo per 60 s: 6,0 MB privati, 9,2 MB committed,
+  47 ms di CPU, 3,8 risvegli/s, 5 thread, GPU 0, 0 figli, primo frame 58 ms; la build di prima
+  nelle stesse condizioni 5,6 MB, 9,3 MB, 47 ms, 6,4 risvegli/s, primo frame 62 ms. Binario
+  3,35 MB (+0,24 MB). Niente committato né installato.

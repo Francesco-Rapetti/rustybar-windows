@@ -1,0 +1,9 @@
+{
+  "devices": [
+    {"name": "Aurora Buds", "category": "Communication.Headset.Bluetooth", "battery": 15, "connected": true},
+    {"name": "Pixel Ridge", "category": "Communication.Phone", "battery": 64, "connected": true},
+    {"name": "Tempo Keys 75", "category": "Input.Keyboard", "battery": 8, "connected": true},
+    {"name": "Glide Mouse", "category": "Input.Mouse", "battery": 72, "connected": false},
+    {"name": "Arcade Pad", "category": "Input.Gaming", "battery": 41, "connected": false}
+  ]
+}

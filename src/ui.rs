@@ -9,7 +9,7 @@ use std::sync::Arc;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
-    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory, IDWriteFactory,
     IDWriteInlineObject, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::core::{BOOL, HSTRING, Result};
@@ -34,11 +34,13 @@ pub struct Item {
     pub icon: bool,
     /// The Windows logo, drawn as its four squares in the room of an icon (no font has it).
     pub logo: bool,
+    /// A picture (a cover), a square as tall as the theme's font is big, with rounded corners.
+    pub image: Option<Arc<Image>>,
 }
 
 impl Item {
     pub fn text(text: impl Into<String>, color: Rgba) -> Item {
-        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false }
+        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false, image: None }
     }
 
     /// An icon: a glyph of Segoe Fluent Icons (`"\u{E767}"`, the speaker).
@@ -50,6 +52,11 @@ impl Item {
     /// size), as the macOS RustyBar has Apple's.
     pub fn windows_logo(color: Rgba) -> Item {
         Item { logo: true, ..Item::icon("\u{E8A9}", color) }
+    }
+
+    /// A picture `size` DIPs on a side (a cover), in place of text.
+    pub fn image(image: Arc<Image>, size: f32) -> Item {
+        Item { image: Some(image), min_width: size, ..Item::text("", Rgba::TRANSPARENT) }
     }
 
     /// In the theme's small font.
@@ -230,6 +237,7 @@ impl Text {
                 }
             };
             (item.text.as_str(), item.color.bits(), item.small, item.icon, item.logo, width.to_bits(), text_x.to_bits()).hash(&mut h);
+            item.image.as_ref().map(|i| i.id).hash(&mut h);
             items.push(Placed { x, width, text_x, text_height, layout });
             x += width;
         }
@@ -351,6 +359,8 @@ pub enum Shape {
     Text { rect: Rect, text: String, font: Font, color: Rgba, align: Align },
     /// A picture stretched over the rectangle, with its corners rounded.
     Image { rect: Rect, radius: f32, image: Arc<Image> },
+    /// Text that wraps at the rectangle's width, from its top: a description, a paragraph.
+    Para { rect: Rect, text: String, font: Font, color: Rgba },
 }
 
 /// A part of the popup that can be clicked: under the mouse it gets the hover tint, in its shape.
@@ -413,6 +423,11 @@ impl Scene {
         self.shapes.push(Shape::Image { rect, radius, image });
     }
 
+    /// Text that wraps at `rect`'s width, from its top (see `Fonts::wrapped` for its height).
+    pub fn para(&mut self, rect: Rect, text: impl Into<String>, font: Font, color: Rgba) {
+        self.shapes.push(Shape::Para { rect, text: text.into(), font, color });
+    }
+
     pub fn zone(&mut self, rect: Rect, radius: f32, action: impl Into<String>) {
         self.zones.push(Zone { rect, radius, action: action.into(), slider: false });
     }
@@ -431,6 +446,7 @@ impl Scene {
                 Shape::Fill { rect, radius, color } => Shape::Fill { rect: moved(rect), radius, color },
                 Shape::Text { rect, text, font, color, align } => Shape::Text { rect: moved(rect), text, font, color, align },
                 Shape::Image { rect, radius, image } => Shape::Image { rect: moved(rect), radius, image },
+                Shape::Para { rect, text, font, color } => Shape::Para { rect: moved(rect), text, font, color },
             });
         }
         for zone in other.zones {
@@ -464,6 +480,11 @@ impl Scene {
                     2u8.hash(&mut h);
                     rect.hash_into(&mut h);
                     (radius.to_bits(), image.id).hash(&mut h);
+                }
+                Shape::Para { rect, text, font, color } => {
+                    3u8.hash(&mut h);
+                    rect.hash_into(&mut h);
+                    (text, font.size.to_bits(), font.weight, font.icons, color.bits()).hash(&mut h);
                 }
             }
         }
@@ -523,6 +544,24 @@ impl Fonts {
             layout.GetMetrics(&mut m)?;
             Ok((layout, m.widthIncludingTrailingWhitespace.min(max_width), m.height))
         }
+    }
+
+    /// `text` laid out to wrap at `width`, with its height.
+    pub fn wrapped(&self, text: &str, font: Font, width: f32) -> Result<(IDWriteTextLayout, f32)> {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let (format, _) = self.format(font)?;
+        unsafe {
+            let layout = self.factory.CreateTextLayout(&wide, &format, width.max(1.0), 100_000.0)?;
+            layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+            let mut m = DWRITE_TEXT_METRICS::default();
+            layout.GetMetrics(&mut m)?;
+            Ok((layout, m.height))
+        }
+    }
+
+    /// How tall `text` is when it wraps at `width`, for laying out a scene.
+    pub fn height(&self, text: &str, font: Font, width: f32) -> f32 {
+        self.wrapped(text, font, width).map(|(_, h)| h).unwrap_or(0.0)
     }
 
     /// How wide `text` is, for laying out a scene.

@@ -48,10 +48,22 @@ local function kind(t)
   end
 end
 for _, t in ipairs({ "pill", "text", "icon", "column", "section", "row", "detail", "button", "slider",
-                     "progress", "tile", "tiles", "image", "spacer" }) do
+                     "progress", "toggle", "tile", "tiles", "image", "spacer" }) do
   rb.ui[t] = kind(t)
 end
 function rb.ui.divider() return { _t = "divider" } end
+-- A title that shows the children after it only while `open`, with a chevron that points down
+-- then; `on_click` is for the widget to flip `open` (as on macOS)
+function rb.ui.disclosure(spec)
+  local column = { _t = "column", gap = spec.gap or 4,
+    { _t = "row", on_click = spec.on_click,
+      right = { _t = "icon", spec.open and "E70D" or "E76C", size = 10, color = "subtext" },
+      { _t = "text", spec[1], weight = "semibold" } } }
+  if spec.open then
+    for i = 2, #spec do column[#column + 1] = spec[i] end
+  end
+  return column
+end
 "#;
 
 /// What a request or a command in the background brings back.
@@ -310,6 +322,35 @@ impl Host {
             })?,
         )?;
 
+        // rb.home: the states of Home Assistant that the `home` widget follows, and its services
+        let home = lua.create_table()?;
+        home.set(
+            "state",
+            lua.create_function(|lua, id: String| match crate::widgets::home::state(&id) {
+                Some((state, attributes)) => {
+                    let t = lua.create_table()?;
+                    let name = attributes.get("friendly_name").and_then(crate::json::Json::str).unwrap_or(&id).to_string();
+                    t.set("state", state)?;
+                    t.set("attributes", from_json(lua, &crate::json::Json::Object(attributes))?)?;
+                    t.set("name", name)?;
+                    Ok(Value::Table(t))
+                }
+                None => Ok(Value::Nil),
+            })?,
+        )?;
+        home.set("online", lua.create_function(|_, ()| Ok(crate::widgets::home::online()))?)?;
+        home.set(
+            "call",
+            lua.create_function(|_, (domain, service, data): (String, String, Option<Value>)| {
+                let data = match data.map(|d| to_json(&d)) {
+                    Some(j @ crate::json::Json::Object(_)) => j,
+                    _ => crate::json::Json::Object(Default::default()),
+                };
+                Ok(crate::widgets::home::call(&domain, &service, data))
+            })?,
+        )?;
+        rb.set("home", home)?;
+
         let loaded: Table = package.get("loaded")?;
         loaded.set("rustybar", rb.clone())?;
         g.set("rb", rb)?;
@@ -520,6 +561,28 @@ fn from_json(lua: &Lua, v: &crate::json::Json) -> mlua::Result<Value> {
             Value::Table(t)
         }
     })
+}
+
+/// A Lua value as JSON, for `rb.home.call`: a table whose keys are 1…n is an array, any other an
+/// object; functions and the like are null.
+fn to_json(v: &Value) -> crate::json::Json {
+    use crate::json::Json;
+    match v {
+        Value::Boolean(b) => Json::Bool(*b),
+        Value::Integer(i) => Json::Number(*i as f64),
+        Value::Number(n) => Json::Number(*n),
+        Value::String(s) => Json::String(s.to_string_lossy()),
+        Value::Table(t) => {
+            let n = t.raw_len();
+            let pairs: Vec<(Value, Value)> = t.pairs::<Value, Value>().flatten().collect();
+            if n > 0 && pairs.len() == n {
+                Json::Array((1..=n).map(|i| to_json(&t.raw_get::<Value>(i).unwrap_or(Value::Nil))).collect())
+            } else {
+                Json::Object(pairs.iter().filter_map(|(k, v)| Some((k.as_string().map(|s| s.to_string_lossy())?, to_json(v)))).collect())
+            }
+        }
+        _ => Json::Null,
+    }
 }
 
 /// `rustybar check`: the Lua files of `dir` load, and the names they define. None without files.
