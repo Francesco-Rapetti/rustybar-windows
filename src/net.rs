@@ -24,8 +24,10 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::wake::Wake;
 
-/// gzip and deflate, which WinHTTP undoes by itself.
-const DECOMPRESS_ALL: u32 = 3;
+/// gzip, which WinHTTP undoes by itself. Not deflate: servers send it raw or wrapped in zlib, and
+/// WinHTTP fails on one of them (`E_ABORT` at the first read, from Open-Meteo); asking for gzip
+/// alone, they answer gzip or plain.
+const DECOMPRESS_GZIP: u32 = 1;
 /// The most a request reads: a calendar of years is a few MB.
 const MAX_BODY: usize = 32 << 20;
 /// The receive buffer of a WebSocket: a message longer than this comes in pieces.
@@ -107,7 +109,7 @@ pub fn request(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&
             WinHttpOpenRequest(connect.0, &HSTRING::from(method), &HSTRING::from(&u.path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags),
             "request",
         )?;
-        let _ = WinHttpSetOption(Some(req.0), WINHTTP_OPTION_DECOMPRESSION, Some(&DECOMPRESS_ALL.to_ne_bytes()));
+        let _ = WinHttpSetOption(Some(req.0), WINHTTP_OPTION_DECOMPRESSION, Some(&DECOMPRESS_GZIP.to_ne_bytes()));
         let lines: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
         let lines: Vec<u16> = lines.encode_utf16().collect();
         let (data, len) = match body {
@@ -404,5 +406,15 @@ mod tests {
         assert_eq!(parse("http://[::1]:8080/a").unwrap().port, 8080);
         assert!(parse("ftp://x").is_none());
         assert!(parse("homeassistant.local").is_none());
+    }
+
+    /// A server that answers `deflate` when asked (Open-Meteo): it used to fail at the first read.
+    #[test]
+    #[ignore]
+    fn a_server_that_likes_deflate() {
+        let url = "https://api.open-meteo.com/v1/forecast?latitude=41.89&longitude=12.49&current=temperature_2m";
+        let r = request("GET", url, &[], None, 15_000).unwrap();
+        assert_eq!(r.status, 200);
+        assert!(String::from_utf8_lossy(&r.body).contains("temperature_2m"));
     }
 }
