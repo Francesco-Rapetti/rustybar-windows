@@ -24,7 +24,7 @@ the same ideas, built on Windows' own pieces.
 
 ![The left end of the bar: the Windows logo, the virtual desktops, the app in front, the screens' refresh rate, and what's playing](docs/screenshots/bar-left.png)
 
-![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the batteries that run low, the network with a VPN, the sound with the headphones' battery and the microphone in use, CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
+![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the batteries side by side, each with its kind, short name, a small bar and its level (a mouse charging, two keyboards, a controller, earbuds that run low, a mouse asleep and dimmed), the network with a VPN, the sound with the headphones' battery and the microphone in use, CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
 
 ## What it costs
 
@@ -205,7 +205,7 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
 </tr>
 <tr>
 <td align="center" valign="top"><img src="docs/screenshots/audio.png" width="320" alt="Output and input volume with sliders, the microphone in use by a chat app, the mixer with a game, a chat, music and system sounds, then the outputs and inputs to switch to, the Bluetooth headphones with their battery"><br><code>audio</code></td>
-<td align="center" valign="top"><img src="docs/screenshots/media.png" width="320" alt="A player in the colors of its cover, navy with pink controls: a switch between three apps, the cover, title, artist, album and app, a bar to seek, shuffle, previous, pause, next and repeat, and the app's volume"><br><code>media</code><br><br><img src="docs/screenshots/devices.png" width="300" alt="Bluetooth devices: earbuds at 15% in yellow, a phone, a keyboard at 8% in red, a controller and a mouse not connected with their last levels"><br><code>devices</code></td>
+<td align="center" valign="top"><img src="docs/screenshots/media.png" width="320" alt="A player in the colors of its cover, navy with pink controls: a switch between three apps, the cover, title, artist, album and app, a bar to seek, shuffle, previous, pause, next and repeat, and the app's volume"><br><code>media</code><br><br><img src="docs/screenshots/devices.png" width="324" alt="Batteries as tiles, each with its kind in a round badge, name, maker and link, the level big and as a bar: a controller, earbuds at 15% on a yellow tile, a mouse charging on its cable, a phone, a split keyboard with a bar for each half, a keyboard at 8% on a red tile, a mouse that sleeps, dimmed, and a controller not connected"><br><code>devices</code></td>
 </tr>
 <tr>
 <td align="center" valign="top"><img src="docs/screenshots/claude.png" width="344" alt="A Claude account with its plan, the session and the week with a bar each, when they reset and how long until then"><br><code>claude</code></td>
@@ -346,15 +346,37 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
   follows Docker's events on the pipe (a thread waiting on it, idle while nothing happens) and
   reads again a second after a burst of them; CPU and memory only while the popup is open. While
   Docker is off it tries the pipe every 30 s, not while no bar shows or a listed game is in front.
-- **devices** (not in the default layout): the batteries of the Bluetooth devices, as Settings >
-  Bluetooth & devices shows them (a phone, earbuds, a keyboard, a mouse, a controller). The pill
-  shows only while a connected one runs low (`low`, 20%; `always = true` keeps every connected one
-  there): its kind and its level, yellow, red at 10%. The popup lists every paired device with a
-  battery, the connected ones first, the others dimmed with the last level Windows had, and the
-  Bluetooth settings. Windows doesn't announce a new level, so the known devices are read again
-  every 5 minutes while a bar shows without a listed game in front (well under a millisecond),
-  and all of them (~10 ms) a second after Windows says a device came or went, as one does when
-  it connects.
+- **devices** (not in the default layout): the batteries of the mice, keyboards and controllers,
+  behind a receiver or a cable too, and of the Bluetooth devices as Settings > Bluetooth & devices
+  shows them (a phone, earbuds). The pill shows the connected ones that run low (`low`, 20%), the
+  kinds of `pinned` always (`pinned = ["mouse", "keyboard", "controller"]`, one each), or every
+  connected one with `always = true`, side by side with a thin line between them: its kind, a
+  short name (the model without its maker: *Naga*, *Falcata*, *MX Master 4*; or yours, `names =
+  { "Razer Naga V2 Pro" = "Desk" }`), its level as a small bar and a number, colored by how full
+  it is (green above half, yellow down to a quarter, orange down to a tenth, then red; the number
+  takes the color from yellow down), and a bolt while it charges. One behind a receiver that sleeps (a keyboard left
+  alone, a mouse that's off) stays there dimmed, with the level it had when it last answered
+  since the bar started. The popup has a tile for each connected one: its kind in a round badge,
+  its full name, the maker, how it's connected and whether it charges (or when it last answered),
+  the level big and as a bar (one for each half of a split keyboard), the tile tinted when it
+  runs low; then the others in short rows, and the Bluetooth settings. A device seen on two links
+  (paired over Bluetooth, on its receiver now) shows once.
+
+  Besides Bluetooth, each maker's own way, all of it questions the device answers and never a
+  setting: Razer (cable and HyperSpeed receivers), Logitech (HID++ through Bolt, Unifying and
+  Lightspeed receivers; the receiver knows the name of a mouse that sleeps), ASUS ROG (SpeedNova
+  and Omni receivers, both halves of a split keyboard), the Steam Controller (2026), DualSense and
+  DualShock 4, Xbox controllers through XInput (four levels, not a percentage). Not a Keychron
+  behind its receiver: nothing documents how to ask it (over Bluetooth it shows). `receivers =
+  false` keeps Bluetooth alone.
+
+  Windows doesn't announce a new level, so everything is read again every 5 minutes while a bar
+  shows without a listed game in front, when the popup opens, and a second after Windows says a
+  device came or went. Bluetooth on the main thread (well under a millisecond; ~10 ms for all of
+  it); the receivers and cables on a worker thread that ends with the pass, with `hid.dll` loaded
+  only for it: ~3.5 ms of CPU, up to 4 s of waiting while a Steam Controller sends its battery
+  among its other reports. Finding the receivers again (~0.2 s on that thread) happens only when
+  devices change.
 - **display** (not in the default layout): the main screen's refresh rate (`120 Hz`), and `HDR`
   while it's on. Its popup has each screen with its name and resolution, the refresh rates it
   has at that resolution (a click switches, as Settings does), HDR on and off, and the

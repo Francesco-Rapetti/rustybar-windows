@@ -18,6 +18,7 @@ pub mod display;
 pub mod docker;
 pub mod events;
 pub mod front_app;
+mod hid;
 pub mod home;
 pub mod lua;
 pub mod media;

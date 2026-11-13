@@ -278,7 +278,8 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   pill `Item::icon` (Segoe Fluent Icons) e `Item::image` (una figura quadrata: la copertina); nei
   popup `Shape::Image`, `Scene::slider`, `Input::Slide`/`Release`, testi tagliati coi puntini.
   Moduli d'aiuto in `widgets/`: `mixer.rs` (il mixer di `audio`), `privacy.rs` (microfono e
-  fotocamera in uso). Fuori: `crash.rs` (il motivo di un crash nel log e la ripartenza).
+  fotocamera in uso), `hid.rs` (le batterie dietro ricevitori e cavi, per `devices`). Fuori:
+  `crash.rs` (il motivo di un crash nel log e la ripartenza).
 
 ## Decisioni (con l'utente, 10/11/2026)
 
@@ -1046,6 +1047,112 @@ opzione spenta. Ordine: le piccole prima.
     la fotocamera (`audio`); i cursori del mixer su app vere; un crash della barra installata
     con `reserve = true` (lo spazio riservato che resta); `screens = "primary"` con due schermi.
 
+## Batterie di mouse, tastiere e controller (decise con l'utente il 13/11/2026)
+
+L'utente vuole nella barra la batteria del mouse, della tastiera e dei controller collegati, tutti
+se sono più d'uno. Qui: Razer Naga V2 Pro (cavo, ricevitore HyperSpeed, Base Station), Razer
+BlackWidow V4 Pro 75%, Logitech MX Master 4 (Bolt), ROG Falcata (tastiera divisa, ricevitore
+SpeedNova 8K), una Keychron (Ultra-Link 8K), uno Steam Controller (2026, puck), più tastiere in
+Bluetooth. Sonda di sola lettura (solo comandi GET) e costi nella nota condivisa
+`batterie-hid-2026-11-13.md`; nessuna interfaccia ha la batteria standard HID (pagina 0x06/0x20):
+ogni produttore ha il suo protocollo. Proposta confermata così, più i controller PlayStation:
+
+- **`devices` si allarga** (non un widget nuovo): oltre al Bluetooth, i mouse, le tastiere e i
+  controller dietro un ricevitore o un cavo. Razer (feature report di 90 byte, `07 80` e `07 84`),
+  Logitech (HID++ 2.0 attraverso il ricevitore, `0x1004` o `0x1000`; il nome dal ricevitore anche
+  mentre il dispositivo dorme), ROG (ricevitori SpeedNova/Omni: `12 01` per la tastiera, le due
+  metà della Falcata, dedotto da una lettura e confermato dall'utente; `12 07` per il mouse, come
+  G-Helper), Steam Controller (il rapporto 0x43 che arriva da solo ogni ~3,5 s), DualSense e
+  DualShock 4 (il byte della batteria nel rapporto d'ingresso, come SDL; non provati: qui non ce
+  n'è uno), Xbox (XInput, quattro livelli; non provato). Fuori: la Keychron sul ricevitore (nessun
+  protocollo documentato: niente comandi tirati a indovinare), in Bluetooth si vede già.
+- **Costo**: tutto su un thread di lavoro che poi finisce, `hid.dll` e `xinput1_4.dll` caricate
+  solo per il giro e lasciate. Scoperta (solo le interfacce dei produttori noti, scelte dal
+  percorso prima di aprirle: aprirle tutte costa ~330 ms) all'avvio, quando cambiano i dispositivi,
+  al risveglio e quando una barra torna; letture ogni 5 minuti con una barra visibile e nessun
+  gioco della lista, e all'apertura del popup. Misurato con la sonda: scoperta 132 ms, 10 ms di
+  CPU; un giro 3,5 ms di CPU (0,6 s d'attesa, 3,4 s con lo Steam Controller).
+- **Barra**: `pinned = ["mouse", "keyboard", "controller"]` tiene quei tipi sempre nella pill, uno
+  per dispositivo collegato; gli altri solo a `low`; `always = true` resta (tutti). La batteria in
+  carica con l'icona della carica, i livelli approssimati (XInput) senza numero, la Falcata con la
+  metà più scarica. `receivers = false` lascia il solo Bluetooth.
+- **Chi dorme resta** (chiesto dall'utente il 13/11/2026, dopo averle viste sparire): un
+  dispositivo dietro un ricevitore o un cavo che non risponde (una tastiera lasciata stare, un
+  mouse spento) ma che ha risposto da quando la barra è partita resta nella pill, tutto in grigio
+  (`subtext`) col livello di allora; nel popup «Non risponde». Uno mai letto da quando la barra è
+  partita no (nessun livello da mostrare); il Bluetooth non collegato no (il suo livello può
+  essere di giorni prima).
+- **Aspetto** (chiesto dall'utente il 13/11/2026: «più accattivante e con più informazioni,
+  altrimenti non so quale dispositivo è quale»; scelto da una bozza fra due pill, «A» e il popup
+  a riquadri). Pill: tutti in una, con una linea sottile fra uno e l'altro; per ognuno l'icona del
+  tipo, il nome corto in `subtext` (il modello senza il produttore e le parole che hanno tutti:
+  `Naga`, `BlackWidow`, `Falcata`, `MX Master 4`, `Steam`, `Steam 2`; o quello dell'utente,
+  `names = { "Razer Naga V2 Pro" = "…" }`, dalla pagina del widget), una barretta col livello
+  e il numero, il fulmine giallo in carica. Colori a scala su tutto il livello (chiesto
+  dall'utente: la MX Master 4 al 25% era verde, «ma è quasi scarico»; `level_name`): verde sopra
+  il 50%, giallo fino al 25%, `peach` (arancio) fino al 10%, rosso sotto; il numero nel colore
+  della barra da giallo in giù, nel colore del testo quando è verde; nel popup ogni metà della
+  Falcata col suo. Il riquadro tinto e la pill per chi scende sotto `low` restano a 20. Compatta: icona e
+  barretta. Popup (324 DIP): un riquadro per collegato (o addormentato) con il tipo in un tondo del
+  suo colore, il nome intero, produttore · collegamento · in carica (o «non risponde · letto alle
+  HH:MM»), il livello grande e una barra (due per le metà della Falcata, «Metà 1/2»), il riquadro
+  tinto quando è basso; poi «Non collegati» in righe brevi.
+- **Doppioni**: un dispositivo non collegato da una parte (Bluetooth, o il ricevitore senza il suo
+  dispositivo) e collegato dall'altra, stesso produttore e tipo, si mostra una volta.
+
+Fatto (13/11/2026), com'è fatto:
+
+- `widgets/hid.rs`: `pass(known, rediscover)` sul thread di lavoro. `hid.dll` caricata con
+  `LoadLibraryExW` per il giro (`Api`, puntatori con `function`, come `netapi32` in `power`) e
+  lasciata alla fine; `xinput1_4.dll` lo stesso. Scoperta: `CM_Get_Device_Interface_List` della
+  classe HID, poi solo i percorsi con `vid_1532`, `vid_046d`, `vid_0b05`, `vid_28de`, `vid_054c` o
+  `&0002054c` aperti con accesso 0 (`HidD_GetAttributes`, `HidP_GetCaps`, l'ID dei rapporti
+  d'uscita, il nome del prodotto, il contenitore da `DEVPKEY_Device_InstanceId` →
+  `DEVPKEY_Device_ContainerId`); le collezioni (solo i percorsi, nessun handle) restano fino al
+  prossimo cambio di dispositivi. `Port`: una collezione aperta in overlapped con una lettura in
+  attesa alla volta (buffer e `OVERLAPPED` in un `Box`, annullata al `Drop`). Razer: per
+  contenitore, le collezioni con il feature report di 91 byte; transazione 0x1F, poi 0x3F e 0xFF;
+  le risposte di un altro programma (comando diverso) ignorate, stato 1 = occupato (5 ms e
+  riprova, al massimo 10 volte), 4 = il ricevitore senza il dispositivo (non collegato), 5 = non
+  lo sa (non è uno con la batteria); tipo dal PID (sotto 0x0100 mouse, fino a 0x04FF tastiera, il
+  resto no: basi, tappetini, luci, case, cuffie); in carica → collegamento «Cavo». Logitech: per
+  contenitore le collezioni HID++ corta (FF00/0001) e lunga (FF00/0002), lette insieme con
+  `WaitForMultipleObjects`; il software id 0x0A; per un ricevitore (nome del prodotto con
+  «receiver») gli slot 1–6 con `IRoot.getFeature(0x1004)` → `getStatus` (o `0x1000`), nome e
+  tipo dai registri del ricevitore (Bolt `B5 5n`/`B5 6n` con 1; Unifying e Lightspeed `B5 2n`/
+  `B5 4n`, non provati); uno slot senza nome nei registri è vuoto; un dispositivo che non è un
+  ricevitore all'indirizzo 0xFF col nome da `0x0005`. ROG: solo i contenitori con una collezione
+  mouse o tastiera (mai le luci della scheda madre); sulle collezioni vendor da 64 byte, rapporto
+  2 → `12 01` (byte 6 il livello, byte 11 l'altra metà se il byte 7 è 2; 0 = dorme), rapporto 3 o
+  0 da 65 byte → `12 07` (byte 5, carica al byte 10); `FF AA` = niente lì; senza nome (il
+  ricevitore) lo prende dal Bluetooth dello stesso produttore e tipo, altrimenti «Tastiera ROG».
+  Valve: le collezioni FF00/0001 di 28DE:1302–1304, `HidD_SetNumInputBuffers(512)`, fino a tre
+  pause da 1,5 s e svuotate; uno slot che non ha mandato niente non ha un controller. Sony: la
+  collezione gamepad (pagina 1, uso 5), un solo rapporto; Bluetooth dal percorso (`{00001124` o
+  `&0002054c`): il rapporto corto 0x01 di Bluetooth è ignorato (non ha la batteria). XInput:
+  `XInputGetBatteryInformation` dei quattro posti, cablato e scollegato no; livelli 5/30/60/100
+  per disegnare la batteria, nel popup «Scarica/Bassa/Media/Piena» e nella pill senza numero.
+  `merge`: un dispositivo per chiave, quello collegato e in carica prima.
+- `widgets/devices.rs`: `Paired` (Bluetooth, come prima, più il produttore dal `VID&` del nodo
+  HID dello stesso contenitore: Razer in Bluetooth dice 0x068E) e `Found` (ricevitori e cavi) →
+  `Device` (`combine`). Il lavoro: `Work` (le collezioni e il risultato in un `Mutex`) e un
+  `wake::Wake` tra gli handle; un giro alla volta (`reading`), uno chiesto intanto parte dopo
+  (`again`, con la nuova scoperta se uno dei due la voleva); thread `devices` da 256 KB di stack.
+  `last`: l'ultimo livello di ogni chiave, per chi dorme (`Device::asleep`: non risponde ma è in
+  `last`; `in_pill` lo tiene, `colors` lo attenua); mai letto → «–». `combine`: dentro un
+  produttore e un tipo (non `Other`), se qualcuno è collegato gli altri spariscono, se nessuno ne
+  resta uno (con un livello, prima quello del ricevitore); i controller XInput tanti quanti gli
+  Xbox collegati in Bluetooth spariscono. Timer di 5 minuti con qualcosa da leggere (Bluetooth o
+  collezioni o dispositivi trovati). Opzioni: `low`, `always`, `pinned` (`mouse`, `keyboard`,
+  `controller`, `other`), `receivers`. `Options::strings` in `config.rs`. Pagina del widget:
+  «Sempre nella barra, per tipo» (tre interruttori che scrivono `pinned`, `schema::pinned`),
+  «Nomi nella barra» (`schema::names`: un campo per nome dato, il cestino, e «Aggiungi un nome»
+  con `nome completo = nome corto`) e «Ricevitori e cavi». La barretta della pill: `ui::Drawn`
+  (`Item::gauge`, `Item::rule`), disegnata in `bar::paint_text` e in `pill_shapes` del popup ⋯
+  da `ui::drawn` (allineata ai pixel). Nome corto: `short_name`. Dati finti: `link`, `charging`,
+  `second`, `approx`, `asleep`, `read`, `battery` assente = mai letto; nella barra finta `pinned = ["mouse", "keyboard", "controller"]`. Screenshot del
+  README rifatti: `devices.png`, `bar-right.png`.
+
 ## Domande aperte (da decidere con l'utente)
 
 - Nessuna per ora.
@@ -1349,3 +1456,39 @@ opzione spenta. Ordine: le piccole prima.
   47 ms di CPU, 3,8 risvegli/s, 5 thread, GPU 0, 0 figli, primo frame 58 ms; la build di prima
   nelle stesse condizioni 5,6 MB, 9,3 MB, 47 ms, 6,4 risvegli/s, primo frame 62 ms. Binario
   3,35 MB (+0,24 MB). Niente committato né installato.
+- 13/11/2026, **batterie di mouse, tastiere e controller** (sezione omonima sopra): chiesti
+  all'utente i dispositivi, sonda di sola lettura, proposta confermata più i controller
+  PlayStation. Barra di prova (`reserve = false`, `pinned = ["mouse", "keyboard", "controller"]`)
+  coi dispositivi veri: pill «mouse 100% (in carica) · tastiera 53% · controller 91%»; popup con
+  la Naga sul cavo in carica, la Falcata 53% · 53% col nome del Bluetooth, lo Steam Controller,
+  MX Master 4 e BlackWidow addormentati (una volta sola: prima la BlackWidow compariva due volte,
+  dal Bluetooth e dal ricevitore, corretto con la regola di `combine`). Scoperta: 88 collezioni in
+  ~210 ms sul thread di lavoro; un giro 2,2–3,7 s d'attesa (lo Steam Controller). Una ricarica con
+  scoperta e giro: +12 cambi di contesto sul thread principale. Misure: a riposo per 60 s 4,6 MB
+  privati, 8,5 MB committed, 0 ms di CPU, 0,08 risvegli/s, 6 thread, 0 figli (una barra di prova
+  col solo orologio, appena avviata: 4,1 MB, 7,2 MB committed, 5 thread); 330 s con un giro del
+  timer: 63 ms di CPU in tutto (orologio compreso), e il giro sveglia il thread principale ~7
+  volte (contatori per thread). In quelle finestre lunghe c'erano ~780 cambi di contesto, ma a
+  raffiche anche lontano dal giro (+52 in 10 s senza giro): non vengono dal giro, probabilmente il
+  mouse dell'utente sulla striscia della barra di prova, che è sopra tutto. Binario
+  3,40 MB (+54 KB; `hid.dll` e `xinput1_4.dll` non sono importate: caricate per il giro). Test:
+  98, più 3 ignorati. Screenshot `devices.png` e `bar-right.png` rifatti dalla barra finta. Non
+  provati: un mouse ROG sul ricevitore (qui solo la tastiera), DualSense, DualShock 4 e Xbox
+  (nessuno collegato), i ricevitori Unifying e Lightspeed (i loro registri), la carica della
+  Falcata (non so ancora quale byte la dice), un Logitech collegato via cavo (indirizzo 0xFF), due
+  Steam Controller sullo stesso puck. Niente committato. Installata con il permesso dell'utente
+  (`rustybar install`), e `devices` aggiunto alla sua config vera (a destra prima di `network`,
+  `pinned = ["mouse", "keyboard", "controller"]`): pill «MX Master 4 25% · Naga 100% in carica ·
+  Steam Controller 90%»; le due tastiere in quel momento non rispondevano al ricevitore (dormono:
+  la Falcata aveva risposto pochi minuti prima), quindi «Non collegato» e fuori dalla pill finché
+  non sono sveglie a un giro. L'utente ha voluto tenerle: «Chi dorme resta» (sopra), con un test
+  (`a_keyboard_that_sleeps_stays_dimmed`, 99 in tutto), il mouse addormentato nei dati finti
+  (`asleep`) e nei due screenshot; reinstallata: pill «BlackWidow 94% · Naga 100% · Steam
+  Controller 90%» (dopo la ripartenza la MX Master 4, che dormiva, non è ancora stata letta).
+  Poi il nuovo aspetto (sopra, «Aspetto»), scelto dall'utente da una bozza: test 100 (nomi corti,
+  i dettagli di un riquadro), clippy senza avvisi, `devices.png` e `bar-right.png` rifatti (il
+  popup è largo 324), la pagina del widget guardata con `settings --shot`; reinstallata: pill
+  «Naga 100% · Falcata 52% · Steam 89%», popup coi tre riquadri e i sei non collegati.
+  Poi i colori a scala (sopra, «Aspetto»): test 101 (`colors_of_levels`), screenshot rifatti,
+  reinstallata. Dopo ogni reinstallazione chi dormiva (MX Master 4, Falcata) torna nella pill solo
+  quando risponde a un giro: `last` riparte vuoto.

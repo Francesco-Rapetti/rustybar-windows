@@ -291,6 +291,11 @@ impl Options {
     pub fn bool(&self, key: &str) -> Option<bool> {
         self.0.get(key).and_then(|v| v.as_bool())
     }
+
+    /// A list of texts (what isn't a text in it is left out).
+    pub fn strings(&self, key: &str) -> Option<Vec<String>> {
+        self.0.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+    }
 }
 
 #[cfg(test)]

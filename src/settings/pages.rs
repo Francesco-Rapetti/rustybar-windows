@@ -56,7 +56,7 @@ pub fn info(kind: &str) -> (&'static str, &'static str, &'static str) {
         "events" => (t("Eventi", "Events"), "\u{E787}", t("Il prossimo evento di oggi dai calendari iCal.", "Today's next event from iCal calendars.")),
         "docker" => ("Docker", "\u{E7B8}", t("I container, coi pulsanti per gestirli, e lo spazio da pulire.", "The containers, with buttons to manage them, and the space to clean up.")),
         "display" => (t("Schermi", "Displays"), "\u{E7F4}", t("La frequenza dello schermo; nel popup frequenze, HDR e luminosità.", "The screen's refresh rate; rates, HDR and brightness in the popup.")),
-        "devices" => (t("Batterie", "Batteries"), "\u{E702}", t("Le batterie dei dispositivi Bluetooth: nella barra solo quando una si scarica.", "The batteries of the Bluetooth devices: in the bar only when one runs low.")),
+        "devices" => (t("Batterie", "Batteries"), "\u{E702}", t("Le batterie di mouse, tastiere e controller, anche dietro un ricevitore o un cavo, e dei dispositivi Bluetooth: nella barra i tipi scelti, gli altri quando si scaricano.", "The batteries of mice, keyboards and controllers, behind a receiver or a cable too, and of the Bluetooth devices: the kinds chosen in the bar, the others when they run low.")),
         _ => ("", "\u{E943}", t("Un widget scritto in Lua, in widgets\\ accanto alla config.", "A widget written in Lua, in widgets\\ next to the config.")),
     }
 }

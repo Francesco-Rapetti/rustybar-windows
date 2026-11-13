@@ -555,6 +555,15 @@ fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, th
                 }
                 continue;
             }
+            if let Some(drawn) = item.drawn {
+                let (track, radius, fill) = crate::ui::drawn(drawn, placed.x, 0.0, placed.width, height, theme.font_size, s);
+                ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: gfx::rect(track.x, track.y, track.w, track.h), radiusX: radius, radiusY: radius }, brush);
+                if let (Some(f), crate::ui::Drawn::Gauge(_, color)) = (fill, drawn) {
+                    brush.SetColor(&gfx::color(color));
+                    ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: gfx::rect(f.x, f.y, f.w, f.h), radiusX: radius, radiusY: radius }, brush);
+                }
+                continue;
+            }
             let x = placed.x + placed.text_x;
             if item.logo {
                 for r in crate::ui::logo(x, 0.0, placed.width - placed.text_x, height, theme.font_size, s) {

@@ -34,3 +34,6 @@ ping = "1.1.1.1"
 
 [widgets.media]
 pill_cover = true
+
+[widgets.devices]
+pinned = ["mouse", "keyboard", "controller"]

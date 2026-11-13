@@ -30,6 +30,69 @@ fn percent(f: &mut Form, title: &str, desc: Option<&str>, spot: Spot, default: f
     f.row(title, desc, Control::Slider { key, value, num: Num::new(0.0, 100.0, 1.0, 0), run: Rc::new(move |v| store::put(&spot, store::number(v, 0), Some(&def))) });
 }
 
+/// A switch for one kind in a list (`devices`' `pinned`): on puts it in, off takes it out, and an
+/// empty list goes away.
+fn pinned(f: &mut Form, title: &str, spot: Spot, kind: &'static str) {
+    let on = store::get_strings(&spot).unwrap_or_default().iter().any(|k| k == kind);
+    f.row(
+        title,
+        None,
+        Control::Toggle {
+            on,
+            run: Rc::new(move |v| {
+                let mut kinds = store::get_strings(&spot).unwrap_or_default();
+                kinds.retain(|k| k != kind);
+                if v {
+                    kinds.push(kind.to_string());
+                }
+                store::put(&spot, store::strings(&kinds), Some(&toml::Value::Array(Vec::new())));
+            }),
+        },
+    );
+}
+
+/// `devices`' own names for the pill, by the full name the popup shows: a field for each (empty
+/// takes it away, as the bin does), and one that adds `full name = short name`.
+fn names(f: &mut Form, spot: Spot) {
+    f.group(Some(t("Nomi nella barra", "Names in the bar")));
+    for full in store::keys(&spot) {
+        let at = spot.k(&full);
+        let value = store::get_str(&at).unwrap_or_default();
+        let (edit, bin) = (at.clone(), at);
+        let field = Control::Text {
+            value,
+            placeholder: String::new(),
+            width: 180.0,
+            run: Rc::new(move |v: String| {
+                let v = v.trim();
+                if v.is_empty() { store::remove(&edit) } else { store::set(&edit, Value::from(v)) }
+            }),
+        };
+        let remove = Control::Icon { glyph: "\u{E74D}", run: Rc::new(move || store::remove(&bin)) };
+        f.row_controls(None, &full, None, vec![field, remove]);
+    }
+    f.row(
+        t("Aggiungi un nome", "Add a name"),
+        Some(t(
+            "Il nome completo come nel popup, «=», e quello da mostrare nella barra; senza, il modello senza il produttore (Naga, Falcata)",
+            "The full name as in the popup, «=», and the one to show in the bar; without one, the model without its maker (Naga, Falcata)",
+        )),
+        Control::Text {
+            value: String::new(),
+            placeholder: "Razer Naga V2 Pro = Naga".into(),
+            width: 260.0,
+            run: Rc::new(move |line: String| {
+                if let Some((full, short)) = line.split_once('=')
+                    && !full.trim().is_empty()
+                    && !short.trim().is_empty()
+                {
+                    store::set(&spot.k(full.trim()), Value::from(short.trim()));
+                }
+            }),
+        },
+    );
+}
+
 // ---- secrets -----------------------------------------------------------------------------------
 
 thread_local! {
@@ -136,7 +199,23 @@ pub fn widget(f: &mut Form, name: &str, ctx: &Ctx) {
             f.group(None);
             percent(f, t("Nella barra da", "In the bar from"), Some(t("La pill compare quando un dispositivo collegato scende fin qui", "The pill shows when a connected device gets this low")), table.k("low"), 20.0);
             toggle(f, t("Sempre nella barra", "Always in the bar"), Some(t("Tutti i dispositivi collegati, anche carichi", "Every connected device, charged ones too")), table.k("always"), false);
-            &["low", "always"]
+            f.group(Some(t("Sempre nella barra, per tipo", "Always in the bar, by kind")));
+            for (kind, title) in [("mouse", t("Mouse", "Mice")), ("keyboard", t("Tastiere", "Keyboards")), ("controller", t("Controller", "Controllers"))] {
+                pinned(f, title, table.k("pinned"), kind);
+            }
+            names(f, table.k("names"));
+            f.group(Some(t("Ricevitori e cavi", "Receivers and cables")));
+            toggle(
+                f,
+                t("Mouse, tastiere e controller non Bluetooth", "Mice, keyboards and controllers off Bluetooth"),
+                Some(t(
+                    "Razer, Logitech, ROG, Steam Controller, DualSense, DualShock 4 e Xbox, letti su un thread di lavoro ogni 5 minuti (~3,5 ms di CPU); spento: il solo Bluetooth",
+                    "Razer, Logitech, ROG, Steam Controller, DualSense, DualShock 4 and Xbox, read on a worker thread every 5 minutes (~3.5 ms of CPU); off: Bluetooth alone",
+                )),
+                table.k("receivers"),
+                true,
+            );
+            &["low", "always", "pinned", "names", "receivers"]
         }
         "network" => {
             f.group(None);

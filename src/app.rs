@@ -1473,6 +1473,14 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
             scene.image(Rect::new(x + p.x, y + (t.pill_height - p.width) / 2.0, p.width, p.width), 4.0, image.clone());
             continue;
         }
+        if let Some(drawn) = item.drawn {
+            let (track, radius, fill) = crate::ui::drawn(drawn, x + p.x, y, p.width, t.pill_height, t.font_size, 1.0);
+            scene.fill(track, radius, item.color);
+            if let (Some(f), crate::ui::Drawn::Gauge(_, color)) = (fill, drawn) {
+                scene.fill(f, radius, color);
+            }
+            continue;
+        }
         if item.logo {
             for r in crate::ui::logo(x + p.x + p.text_x, y, p.width - p.text_x, t.pill_height, t.font_size, 1.0) {
                 scene.fill(r, 0.0, item.color);

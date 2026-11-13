@@ -36,11 +36,36 @@ pub struct Item {
     pub logo: bool,
     /// A picture (a cover), a square as tall as the theme's font is big, with rounded corners.
     pub image: Option<Arc<Image>>,
+    /// Drawn in place of text: a level as a small bar, a thin line between groups.
+    pub drawn: Option<Drawn>,
 }
+
+/// What an item can be drawn as, in its color.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Drawn {
+    /// A level (0–100) as a small rounded bar: the item's color is the track, the level is filled
+    /// in the other color (a battery).
+    Gauge(u8, Rgba),
+    /// A thin upright line, as tall as the text.
+    Rule,
+}
+
+/// How wide a gauge is in a pill, in DIPs.
+pub const GAUGE_WIDTH: f32 = 20.0;
 
 impl Item {
     pub fn text(text: impl Into<String>, color: Rgba) -> Item {
-        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false, image: None }
+        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false, image: None, drawn: None }
+    }
+
+    /// A level as a small bar, `fill` over a `track`.
+    pub fn gauge(level: u8, fill: Rgba, track: Rgba) -> Item {
+        Item { drawn: Some(Drawn::Gauge(level.min(100), fill)), min_width: GAUGE_WIDTH, ..Item::text("", track) }
+    }
+
+    /// A thin line between groups of items.
+    pub fn rule(color: Rgba) -> Item {
+        Item { drawn: Some(Drawn::Rule), min_width: 1.0, ..Item::text("", color) }
     }
 
     /// An icon: a glyph of Segoe Fluent Icons (`"\u{E767}"`, the speaker).
@@ -238,6 +263,11 @@ impl Text {
             };
             (item.text.as_str(), item.color.bits(), item.small, item.icon, item.logo, width.to_bits(), text_x.to_bits()).hash(&mut h);
             item.image.as_ref().map(|i| i.id).hash(&mut h);
+            item.drawn.map(|d| match d {
+                Drawn::Gauge(level, fill) => (1u8, level, fill.bits()),
+                Drawn::Rule => (2u8, 0, 0),
+            })
+            .hash(&mut h);
             items.push(Placed { x, width, text_x, text_height, layout });
             x += width;
         }
@@ -258,6 +288,30 @@ pub fn logo(x: f32, y: f32, w: f32, h: f32, size: f32, scale: f32) -> [Rect; 4] 
     let top = ((y + (h - side / scale) / 2.0) * scale).round();
     let at = |col: f32, row: f32| Rect::new((left + col * (square + gap)) / scale, (top + row * (square + gap)) / scale, square / scale, square / scale);
     [at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0), at(1.0, 1.0)]
+}
+
+/// Where a drawn item goes in the box `x`, `y`, `w`, `h` (its room in a pill), lined up with the
+/// pixels at `scale`: the track (or the rule) and its corner radius, and a gauge's fill. A gauge
+/// is a bar 0.6 of the font's size tall; a rule one pixel wide and 1.1 of it tall.
+pub fn drawn(drawn: Drawn, x: f32, y: f32, w: f32, h: f32, size: f32, scale: f32) -> (Rect, f32, Option<Rect>) {
+    let px = |v: f32| (v * scale).round();
+    match drawn {
+        Drawn::Gauge(level, _) => {
+            let height = px(size * 0.6).max(4.0);
+            let width = px(w).max(height);
+            let left = px(x);
+            let top = px(y + (h - height / scale) / 2.0);
+            let filled = if level == 0 { 0.0 } else { (width * level as f32 / 100.0).round().max(height.min(width)) };
+            let track = Rect::new(left / scale, top / scale, width / scale, height / scale);
+            let fill = (filled > 0.0).then(|| Rect::new(left / scale, top / scale, filled / scale, height / scale));
+            (track, height / 2.0 / scale, fill)
+        }
+        Drawn::Rule => {
+            let height = px(size * 1.1);
+            let top = px(y + (h - height / scale) / 2.0);
+            (Rect::new(px(x + w / 2.0) / scale, top / scale, 1.0 / scale, height / scale), 0.0, None)
+        }
+    }
 }
 
 // ---- popups ------------------------------------------------------------------------------------
