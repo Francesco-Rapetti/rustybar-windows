@@ -843,7 +843,7 @@ impl super::Widget for LuaWidget {
                 heard || updated
             }
             Signal::TimeChanged => self.deliver("time", Vec::new()),
-            Signal::DevicesChanged | Signal::Displays => false,
+            Signal::DevicesChanged | Signal::Displays | Signal::FrontWindow(_) => false,
             Signal::Foreground(front) => {
                 if !self.on.iter().any(|o| o == "foreground") {
                     return false;
@@ -874,7 +874,7 @@ impl super::Widget for LuaWidget {
                 || self.item_actions.borrow().iter().any(|a| a.as_ref().is_some_and(|a| !matches!(a, Action::Popup))))
     }
 
-    fn click(&mut self, item: Option<usize>) -> bool {
+    fn click(&mut self, item: Option<usize>, _compact: bool) -> bool {
         let action = item.and_then(|i| self.item_actions.borrow().get(i).cloned().flatten()).or_else(|| self.pill_action.borrow().clone());
         match action {
             Some(Action::Call(f)) => {
@@ -1019,7 +1019,7 @@ mod tests {
         assert_eq!(texts(&w.compact(&t).unwrap()), ["c"]);
         assert!(!w.has_popup() && w.clickable());
         let mut w = w;
-        assert!(w.click(None));
+        assert!(w.click(None, false));
         assert_eq!(texts(&w.pill(&t).unwrap())[1], "Rome 10");
     }
 

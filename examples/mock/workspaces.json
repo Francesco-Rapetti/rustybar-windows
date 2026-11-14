@@ -1,1 +1,15 @@
-{"desktops": ["1", "2", "Games", "4"], "current": 1}
+{
+  "desktops": ["1", "2", "Games", "4"],
+  "current": 1,
+  "windows": [
+    {"desktop": 0, "name": "Browser", "glyph": "E774", "color": "blue"},
+    {"desktop": 0, "name": "Files", "glyph": "E8B7", "color": "yellow"},
+    {"desktop": 1, "name": "Editor", "glyph": "E943", "color": "mauve"},
+    {"desktop": 1, "name": "Terminal", "glyph": "E756", "color": "text"},
+    {"desktop": 1, "name": "Chat", "glyph": "E8BD", "color": "teal"},
+    {"desktop": 1, "name": "Music", "glyph": "E8D6", "color": "green"},
+    {"desktop": 2, "name": "Game", "glyph": "E7FC", "color": "red"},
+    {"desktop": 2, "name": "Launcher", "glyph": "E719", "color": "peach"}
+  ],
+  "front": 2
+}

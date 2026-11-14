@@ -26,7 +26,7 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Shell::{ABN_FULLSCREENAPP, ABN_POSCHANGED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetCursorPos, GetForegroundWindow, IsWindow, MSG,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GA_ROOTOWNER, GetAncestor, GetCursorPos, GetForegroundWindow, IsWindow, MSG,
     MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PM_REMOVE, PeekMessageW,
     PostQuitMessage, QS_ALLINPUT, RegisterClassExW, RegisterWindowMessageW, SPI_GETCLIENTAREAANIMATION,
     SPI_SETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SystemParametersInfoW,
@@ -149,6 +149,8 @@ pub struct App {
     config_stamp: Stamp,
     names: Names,
     front: Foreground,
+    /// The window in front (see `Signal::FrontWindow`).
+    front_window: HWND,
     game_in_front: bool,
     system_animations: bool,
     dirty: bool,
@@ -222,6 +224,7 @@ impl App {
             config_stamp: config_stamp(),
             names: Names::default(),
             front: Foreground::default(),
+            front_window: HWND::default(),
             game_in_front: false,
             system_animations: system_animations(),
             dirty: true,
@@ -593,6 +596,12 @@ impl App {
         // Another app came in front (the hook doesn't see this process's windows): the popup
         // closes, as if clicked away, even if it never got the front itself
         self.close_popup(false);
+        let root = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
+        let root = if root.0.is_null() { hwnd } else { root };
+        if root != self.front_window {
+            self.front_window = root;
+            self.broadcast(&Signal::FrontWindow(root));
+        }
         // The taskbar and the desktop leave the app that was in front as it was
         if !bar::is_shell(hwnd)
             && let Some(front) = front_app::resolve(hwnd, &mut self.names)
@@ -979,7 +988,8 @@ impl App {
         } else {
             // A pill that does something by itself (the desktops' switches the desktop)
             self.close_popup(true);
-            if self.widgets[i].widget.click(item) {
+            let compact = self.bars[index].fit.compact.contains(&name) || self.config.bar.always_compact.contains(&name);
+            if self.widgets[i].widget.click(item, compact) {
                 self.changed(i);
             }
         }
@@ -1201,7 +1211,7 @@ impl App {
             let (Ok(item), widget) = (item.parse::<usize>(), widget.to_string()) else { return };
             self.close_popup(true);
             if let Some(i) = self.widgets.iter().position(|s| s.name == widget)
-                && self.widgets[i].widget.click(Some(item))
+                && self.widgets[i].widget.click(Some(item), false)
             {
                 self.changed(i);
             }
@@ -1282,6 +1292,7 @@ impl App {
             let mut changed = false;
             if new {
                 changed |= w.event(&Signal::Foreground(&front));
+                changed |= w.event(&Signal::FrontWindow(self.front_window));
                 if !shown {
                     changed |= w.event(&Signal::Shown(false));
                 }
@@ -1474,13 +1485,17 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
             scene.fill(Rect::new(x + l.x, y + l.y, l.w, l.h), 0.0, t.surface);
         }
     }
-    if let Some(p) = m.pill.highlight.and_then(|i| m.items.get(i)) {
+    if let Some((left, width)) = m.highlighted() {
         let h = t.pill_height - 2.0 * bar::HIGHLIGHT_Y;
-        scene.fill(Rect::new(x + p.x - bar::HIGHLIGHT_X, y + bar::HIGHLIGHT_Y, p.width + 2.0 * bar::HIGHLIGHT_X, h), h / 2.0, t.primary);
+        scene.fill(Rect::new(x + left - bar::HIGHLIGHT_X, y + bar::HIGHLIGHT_Y, width + 2.0 * bar::HIGHLIGHT_X, h), h / 2.0, t.primary);
     }
     for (item, p) in m.pill.items.iter().zip(&m.items) {
+        if let Some(color) = item.tile {
+            let (r, radius) = crate::ui::tile_rect(p.x, p.width, t.pill_height, 1.0);
+            scene.fill(Rect::new(x + r.x, y + r.y, r.w, r.h), radius, color);
+        }
         if let Some(image) = &item.image {
-            scene.image(Rect::new(x + p.x, y + (t.pill_height - p.width) / 2.0, p.width, p.width), 4.0, image.clone());
+            scene.image(Rect::new(x + p.x, y + (t.pill_height - p.width) / 2.0, p.width, p.width), item.image_radius, image.clone());
             continue;
         }
         if let Some(drawn) = item.drawn {

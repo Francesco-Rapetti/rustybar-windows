@@ -10,6 +10,7 @@ use crate::config::Options;
 use crate::theme::Theme;
 use crate::ui::{Fonts, Pill, Scene};
 
+mod app_icons;
 pub mod audio;
 pub mod claude;
 pub mod clock;
@@ -36,6 +37,9 @@ pub const KINDS: &[&str] = &["audio", "claude", "clock", "devices", "display", "
 pub enum Signal<'a> {
     /// Another app came in front.
     Foreground(&'a front_app::Foreground),
+    /// Another window came in front, the taskbar's and the desktop's too: the main window it
+    /// belongs to (a dialog's owner).
+    FrontWindow(windows::Win32::Foundation::HWND),
     /// The PC woke from sleep.
     Resume,
     /// The time, the time zone or the region's formats changed.
@@ -109,8 +113,9 @@ pub trait Widget {
     }
 
     /// A click on the pill of a widget without a popup, on its item `item` (by its index in the
-    /// pill) or between items. True if the pill changed.
-    fn click(&mut self, _item: Option<usize>) -> bool {
+    /// pill) or between items; `compact` when the bar showed the compact form (see `fit`), whose
+    /// items aren't the full one's. True if the pill changed.
+    fn click(&mut self, _item: Option<usize>, _compact: bool) -> bool {
         false
     }
 

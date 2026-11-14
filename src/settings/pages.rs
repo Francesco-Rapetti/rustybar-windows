@@ -44,7 +44,7 @@ pub fn lua_names() -> Vec<String> {
 pub fn info(kind: &str) -> (&'static str, &'static str, &'static str) {
     match kind {
         "power" => (t("Menu di Windows", "Windows menu"), "\u{E7E8}", t("Il logo di Windows, coi comandi del menu Start e questa finestra.", "The Windows logo, with the Start menu's commands and this window.")),
-        "workspaces" => (t("Desktop", "Desktops"), "\u{E7C4}", t("I desktop virtuali di Windows: un clic ci passa.", "Windows' virtual desktops: a click goes there.")),
+        "workspaces" => (t("Desktop", "Desktops"), "\u{E7C4}", t("I desktop virtuali di Windows con le icone delle loro finestre: un clic sul numero ci passa, sull'icona porta davanti la finestra.", "Windows' virtual desktops with the icons of their windows: a click on a number goes there, on an icon brings the window in front.")),
         "front_app" => (t("App attiva", "Front app"), "\u{E71D}", t("Il nome dell'app in primo piano.", "The name of the app in front.")),
         "media" => (t("Musica", "Media"), "\u{EC4F}", t("Cosa suona, con un player nel popup.", "What's playing, with a player in the popup.")),
         "network" => (t("Rete", "Network"), "\u{E839}", t("La connessione, con traffico, dettagli e Wi-Fi nel popup.", "The connection, with traffic, details and Wi-Fi in the popup.")),

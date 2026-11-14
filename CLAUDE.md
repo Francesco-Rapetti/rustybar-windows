@@ -277,13 +277,18 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   ha `pill`, `compact`, `wide` (la forma larga del gruppo centrale), `handle` (un handle da
   aspettare) o `handles` (più d'uno: un evento e un timer) con `signaled`/`signaled_at`
   (meglio riconoscere l'handle che contare gli indici: l'elenco cambia con ciò che gira), ed
-  `event` (`Signal`: `Foreground`, `Resume`, `TimeChanged`, `Shown`, `Game` = un gioco della
+  `event` (`Signal`: `Foreground`, `FrontWindow` = la finestra in primo piano, anche della shell
+  (la principale di un dialogo), `Resume`, `TimeChanged`, `Shown`, `Game` = un gioco della
   lista in primo piano, `DevicesChanged` = `DBT_DEVNODES_CHANGED`, `Displays` = schermi cambiati,
   `Trigger`); dicono se ciò che il widget mostra è cambiato (la pill, o il popup aperto). Nella
-  pill `Item::icon` (Segoe Fluent Icons) e `Item::image` (una figura quadrata: la copertina); nei
+  pill `Item::icon` (Segoe Fluent Icons), `Item::image` (una figura quadrata: la copertina),
+  `Item::app_icon` (agli angoli vivi: l'icona di un'app), `Item::tile` (un riquadro dietro
+  l'elemento) e `Pill::highlight_span` (l'evidenziazione su più elementi); `click(elemento,
+  compatta)` sa se la barra mostrava la forma compatta (`fit.compact` o `always_compact`). Nei
   popup `Shape::Image`, `Scene::slider`, `Input::Slide`/`Release`, testi tagliati coi puntini.
   Moduli d'aiuto in `widgets/`: `mixer.rs` (il mixer di `audio`), `privacy.rs` (microfono e
-  fotocamera in uso), `hid.rs` (le batterie dietro ricevitori e cavi, per `devices`). Fuori:
+  fotocamera in uso), `hid.rs` (le batterie dietro ricevitori e cavi, per `devices`),
+  `app_icons.rs` (le icone delle app, per `workspaces`). Fuori:
   `crash.rs` (il motivo di un crash nel log e la ripartenza).
 
 ## Decisioni (con l'utente, 10/11/2026)
@@ -362,7 +367,8 @@ dati.
   mezzo, in una sola chiamata (i tasti dell'utente non si infilano in mezzo), le frecce con
   `KEYEVENTF_EXTENDEDKEY`; niente con un gioco della lista in primo piano (tasti simulati: un
   anti-cheat potrebbe notarli); il registro dice poi del cambio e l'evidenziazione scivola. Non
-  provato (cambierebbe desktop; qui ce n'è uno).
+  provato (cambierebbe desktop). Dal 14/11/2026 l'utente ha due desktop e la pill ha le icone
+  delle finestre: sezione «Icone delle app in `workspaces`» sotto.
 - `system` (fatto, confermato con l'utente): pill `CPU 12%  GPU 34% 62°  RAM 43%`, etichette
   piccole in `subtext`, ogni numero largo quanto `100%` (`Item::fixed`: la pill non cambia
   misura, si ridisegna solo il testo); giallo da `warning` (75), rosso da `critical` (90); la
@@ -1172,6 +1178,57 @@ Fatto (13/11/2026), com'è fatto:
   `second`, `approx`, `asleep`, `read`, `battery` assente = mai letto; nella barra finta `pinned = ["mouse", "keyboard", "controller"]`. Screenshot del
   README rifatti: `devices.png`, `bar-right.png`.
 
+## Icone delle app in `workspaces` (decise con l'utente il 14/11/2026)
+
+L'utente: «vorrei che nel plugin a sinistra, quello dei workspace, mi mostrasse le icone delle
+applicazioni presenti nel workspace, come la barra di macos» (là `aerospace`: una capsula per
+workspace col numero e un'icona per finestra, la finestra in primo piano su un riquadro più
+scuro, compatta con le icone del solo workspace corrente). Sonda di sola lettura prima del codice
+(con WoW aperto e l'utente al PC), proposta coi costi e una bozza; scelte dell'utente: **un'icona
+per finestra** (come su macOS, non una per app col numero) e **clic sull'icona = porta davanti
+quella finestra** (Windows passa al suo desktop). Il resto come proposto:
+
+- **Quali finestre**: quelle che mostrerebbe la barra delle applicazioni (visibili, non finestre
+  strumento, senza proprietario o `WS_EX_APPWINDOW`, non nascoste dalla loro app: `DWMWA_CLOAKED`
+  2 = nascosta dalla shell, cioè su un altro desktop, resta; con un titolo; nessuna di questo
+  processo). Il desktop di ognuna da `IVirtualDesktopManager::GetWindowDesktopId`, documentata
+  (non le interfacce COM che cambiano fra le build): ~70 µs a finestra perché risponde Explorer
+  (la prima chiamata ~0,8 ms), id nullo per un'app UWP lasciata in sottofondo. Elencarle: 0,1 ms.
+- **Quando**: nessun timer. Uno *shell hook* (`RegisterShellHookWindow` su una finestra
+  message-only, come la barra delle applicazioni): misurati ~30 messaggi al minuto mentre il PC
+  si usa, di cui la barra rilegge solo per finestra creata, chiusa o sostituita (e per un titolo
+  nuovo di una finestra che non conosce); scartati gli hook `EVENT_OBJECT_*` (131 al minuto).
+  Più il registro dei desktop e la finestra in primo piano (`Signal::FrontWindow`): quando
+  Explorer lascia il primo piano (la Visualizzazione attività, dove le finestre si spostano) ogni
+  finestra è richiesta di nuovo. Limite noto: una finestra spostata da un altro programma senza
+  che cambi il primo piano si vede al cambio successivo.
+- **Icone** (`app_icons.rs`), una volta per app e buttate con la sua ultima finestra: dal file
+  dell'eseguibile alla misura esatta (`PrivateExtractIconsW`, ~0,4 ms), altrimenti l'icona della
+  classe della finestra (µs), per le app UWP e pacchettizzate senza icone il logo del pacchetto
+  (`Square44x44Logo` del manifesto, il file `targetsize` più adatto, senza piatto, quello chiaro
+  col tema chiaro, decodificato con WIC su un thread di lavoro: 1–15 ms, +0,2 MB), altrimenti
+  l'iniziale. Scartati: la cartella App di Start (109 ms e +4,2 MB che restano) e `WM_GETICON`
+  (un messaggio all'app: WoW ci ha messo 77 ms a rispondere).
+- **Pill**: per desktop numero (o nome) e icone a 16 DIP nell'ordine in cui le finestre sono
+  arrivate (fermo: con l'ordine dello schermo saltavano a ogni cambio di finestra);
+  l'evidenziazione copre il desktop corrente con le sue icone, la finestra in primo piano su un
+  riquadro (`base` al 35%), i desktop vuoti col solo numero; compatta: le icone del solo desktop
+  corrente; oltre `max_icons` (8) «+N». `icons = false`: soli numeri (e niente hook né
+  gestore). Con un solo desktop resta come prima (nascosta salvo `single = true`).
+
+Fatto (14/11/2026), com'è fatto: `widgets/workspaces.rs` (`Slot`: numero, finestra, «+N» di ogni
+desktop, la stessa per la pill e per il clic, piena o compatta), `widgets/app_icons.rs`.
+Finestre in `windows` (hwnd, desktop, chiave dell'app nella cache); `ignored` le finestre senza
+desktop con i tentativi: Explorer dà il desktop a una finestra nuova un attimo dopo l'avviso
+dello shell (visto con una finestra di prova: scartata per sempre alla prima versione), quindi
+si richiede ogni 300 ms (`retry`, un `wake::Timer`) fino a `TRIES` (4), poi una volta a ogni
+cambio di desktop. La prima lettura dopo il primo frame (`listed`: i segnali dell'avvio non
+leggono). Lo hook mette solo l'evento del widget; tante finestre chiuse insieme fanno una
+lettura. Senza barre visibili hook e gestore tolti. Clic su un'icona: `ShowWindowAsync`
+(`SW_RESTORE`) se ridotta a icona, poi `SetForegroundWindow` (la barra ha appena avuto il clic).
+Dati finti: `windows` in `workspaces.json` (glifi di Segoe Fluent Icons e colori della palette),
+`front`. Pagina del widget: «Icone delle app», «Icone per desktop». `bar-left.png` rifatto.
+
 ## Domande aperte (da decidere con l'utente)
 
 - Nessuna per ora.
@@ -1525,3 +1582,28 @@ Fatto (13/11/2026), com'è fatto:
   geometria delle parti), clippy senza avvisi. `bar-right.png` rifatto. Non provati: un cambio
   di volume dal vivo (cambierebbe il PC), il tema chiaro, una scala diversa dal 100%. Niente
   committato né installato.
+- 14/11/2026, **icone delle app in `workspaces`** (sezione «Icone delle app in `workspaces`»):
+  sonda di sola lettura, proposta coi costi e una bozza, scelte dell'utente. Barra di prova
+  (`reserve = false`, `workspaces` e l'orologio) con le finestre vere: icone giuste dagli
+  eseguibili, dalla classe (app dello Store senza icone nell'eseguibile) e dal logo del pacchetto
+  (un'app UWP su un altro desktop), il riquadro sulla finestra in primo piano; una finestra di
+  prova fuori dallo schermo e senza primo piano (mostrata 3 s): la pill da 242 a 262 px 0,3 s
+  dopo l'avviso dello shell (il primo tentativo trova la finestra ancora senza desktop) e di
+  nuovo 242 quando si chiude. A riposo per 30 s: 0 ms di CPU, 0,03 risvegli/s, 5 thread, 0
+  figli; memoria impegnata 9,2 MB contro 7,5 della stessa barra con `icons = false` (+1,7 MB:
+  le DLL COM per chiedere a Explorer, soprattutto `OneCoreUAPCommonProxyStub`, e WIC perché qui
+  c'è un'app dello Store aperta); primo frame 35 ms, prima lettura delle finestre 16 ms dopo.
+  Binario 3,50 MB (+55 KB). Test 111, più 3 ignorati (nuovi: posti della pill piena e compatta,
+  evidenziazione e riquadro, clic su numeri e icone, soli numeri; logo del manifesto, file del
+  logo, iniziali), clippy senza avvisi. `bar-left.png` rifatto dalla barra finta; la pagina del
+  widget guardata con `settings --shot`. Non provati, perché cambierebbero il PC: il clic su
+  un'icona (il primo piano a un'altra finestra, il cambio di desktop che Windows dovrebbe fare da
+  sé, una finestra ridotta a icona), lo spostamento di una finestra dalla Visualizzazione
+  attività, il tema chiaro (il logo chiaro dei pacchetti), una scala diversa dal 100%. Successo
+  durante il lavoro: l'altra sessione nella stessa cartella (pill di `audio`) ha committato e
+  pushato in `7e57bad` anche le mie prime aggiunte a `ui.rs` (campi e funzioni non ancora usati);
+  il resto non è committato. Installata con il permesso dell'utente (`rustybar install`): la pill
+  vera con le icone dei due desktop e WoW in primo piano sul riquadro; primo frame 131 ms, come
+  le reinstallazioni di prima (105–133 ms; 128 quella subito prima, senza queste modifiche);
+  a riposo per 30 s col layout dell'utente e WoW aperto: 6,9 MB privati, 10,8 MB committed,
+  31 ms di CPU, 3,2 risvegli/s, 7 thread, 0 figli.

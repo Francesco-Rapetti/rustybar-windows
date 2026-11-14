@@ -201,12 +201,13 @@ impl Measured {
     }
 }
 
-/// The tile behind an item `width` DIPs wide at `x` in a pill `height` tall: as tall as the item
-/// is wide plus 2 DIPs a side, centered, on whole pixels at `scale`. Its corner radius second.
+/// The tile behind an item `width` DIPs wide at `x` in a pill `height` tall: a square 1.5 DIPs
+/// past the item on every side, centered, on whole pixels at `scale` (inside the highlight,
+/// which reaches 4 DIPs past). Its corner radius second.
 pub fn tile_rect(x: f32, width: f32, height: f32, scale: f32) -> (Rect, f32) {
     let px = |v: f32| (v * scale).round() / scale;
-    let side = width + 4.0;
-    (Rect::new(px(x - 2.0), px((height - side) / 2.0), px(side), px(side)), 5.0)
+    let side = width + 3.0;
+    (Rect::new(px(x - 1.5), px((height - side) / 2.0), px(side), px(side)), 4.0)
 }
 
 /// A laid out item: where it starts in the pill, how wide it is, and its text ready to draw.
@@ -487,6 +488,13 @@ impl Rect {
 
 /// A picture for a popup (a cover), decoded once: premultiplied BGRA, 4 bytes a pixel, row after
 /// row. `id` tells two pictures apart in a scene's signature without comparing the pixels.
+/// A new `Image::id`, never given before in this process: pictures of different widgets and
+/// decoders don't share one.
+pub fn image_id() -> u64 {
+    static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Image {
     pub id: u64,
     pub width: u32,

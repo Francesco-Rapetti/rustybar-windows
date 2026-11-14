@@ -1407,7 +1407,6 @@ pub fn decode_file(path: &std::path::Path, width: u32, height: u32) -> Option<Im
 /// A picture from the decoder `open` makes, cut from its middle to the shape of `width` ×
 /// `height` and scaled to them, in premultiplied BGRA.
 fn decode(open: impl FnOnce(&IWICImagingFactory) -> windows::core::Result<IWICBitmapDecoder>, width: u32, height: u32) -> Option<Image> {
-    static IDS: AtomicU64 = AtomicU64::new(1);
     let (width, height) = (width.clamp(1, 4096), height.clamp(1, 4096));
     unsafe {
         // The pool's threads may have no COM yet: WIC needs it
@@ -1434,7 +1433,7 @@ fn decode(open: impl FnOnce(&IWICImagingFactory) -> windows::core::Result<IWICBi
             converter.Initialize(&scaler, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
             let mut pixels = vec![0u8; (width * height * 4) as usize];
             converter.CopyPixels(std::ptr::null(), width * 4, &mut pixels)?;
-            Ok(Image { id: IDS.fetch_add(1, Ordering::Relaxed), width, height, pixels })
+            Ok(Image { id: crate::ui::image_id(), width, height, pixels })
         })();
         if initialized {
             CoUninitialize();

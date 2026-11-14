@@ -241,7 +241,9 @@ pub fn widget(f: &mut Form, name: &str, ctx: &Ctx) {
         "workspaces" => {
             f.group(None);
             toggle(f, t("Anche con un solo desktop", "With a single desktop too"), Some(t("Altrimenti la pill si nasconde finché c'è un desktop solo", "Otherwise the pill hides while there's one desktop")), table.k("single"), false);
-            &["single"]
+            toggle(f, t("Icone delle app", "App icons"), Some(t("Un'icona per finestra accanto al numero del suo desktop; spento, solo i numeri (e la barra non segue le finestre)", "An icon per window next to its desktop's number; off, the numbers alone (and the bar doesn't follow the windows)")), table.k("icons"), true);
+            number(f, t("Icone per desktop", "Icons per desktop"), Some(t("Le altre finestre come «+N»", "The other windows as “+N”")), table.k("max_icons"), 8.0, Num::new(1.0, 50.0, 1.0, 0));
+            &["single", "icons", "max_icons"]
         }
         "media" => {
             f.group(None);

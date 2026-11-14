@@ -527,9 +527,9 @@ pub fn paint_pill(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32
         if !m.pill.bare {
             paint_background(ctx, brush, theme, m.width, height);
         }
-        if let Some(item) = m.pill.highlight.and_then(|i| m.items.get(i)) {
+        if let Some((left, width)) = m.highlighted() {
             let h = height - 2.0 * HIGHLIGHT_Y;
-            let tile = gfx::rect(((item.x - HIGHLIGHT_X) * s).round() / s, (HIGHLIGHT_Y * s).round() / s, item.width + 2.0 * HIGHLIGHT_X, h);
+            let tile = gfx::rect(((left - HIGHLIGHT_X) * s).round() / s, (HIGHLIGHT_Y * s).round() / s, width + 2.0 * HIGHLIGHT_X, h);
             brush.SetColor(&gfx::color(theme.primary));
             ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: tile, radiusX: h / 2.0, radiusY: h / 2.0 }, brush);
         }
@@ -565,11 +565,17 @@ fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, th
             }
         }
         for (item, placed) in m.pill.items.iter().zip(&m.items) {
+            if let Some(color) = item.tile {
+                let (r, radius) = crate::ui::tile_rect(placed.x, placed.width, height, s);
+                brush.SetColor(&gfx::color(color));
+                ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: gfx::rect(r.x, r.y, r.w, r.h), radiusX: radius, radiusY: radius }, brush);
+            }
             brush.SetColor(&gfx::color(item.color));
             if let Some(image) = &item.image {
                 let size = placed.width;
-                let y = ((height - size) / 2.0 * s).round() / s;
-                if let Err(e) = crate::popup::draw_image(ctx, crate::ui::Rect::new(placed.x, y, size, size), 4.0, image) {
+                // On whole pixels, so an icon drawn at its size stays sharp
+                let (x, y) = ((placed.x * s).round() / s, ((height - size) / 2.0 * s).round() / s);
+                if let Err(e) = crate::popup::draw_image(ctx, crate::ui::Rect::new(x, y, size, size), item.image_radius, image) {
                     crate::log!("pill image: {e}");
                 }
                 continue;
@@ -600,7 +606,7 @@ fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, th
 /// The tile under the highlighted item: drawn when its size or color change, slid along when the
 /// highlight moves to another item.
 fn highlight(gfx: &Gfx, pv: &mut PillVisual, m: &Measured, theme: &Theme, s: f32, animate: bool) -> Result<()> {
-    let Some(index) = m.pill.highlight.filter(|i| *i < m.items.len()) else {
+    let Some((left, width)) = m.highlighted() else {
         if let Some(h) = pv.highlight.take() {
             unsafe {
                 let _ = pv.visual.RemoveVisual(&h.visual);
@@ -608,9 +614,8 @@ fn highlight(gfx: &Gfx, pv: &mut PillVisual, m: &Measured, theme: &Theme, s: f32
         }
         return Ok(());
     };
-    let item = &m.items[index];
-    let size = (((item.width + 2.0 * HIGHLIGHT_X) * s).round() as u32, ((theme.pill_height - 2.0 * HIGHLIGHT_Y) * s).round() as u32);
-    let x = ((item.x - HIGHLIGHT_X) * s).round();
+    let size = (((width + 2.0 * HIGHLIGHT_X) * s).round() as u32, ((theme.pill_height - 2.0 * HIGHLIGHT_Y) * s).round() as u32);
+    let x = ((left - HIGHLIGHT_X) * s).round();
     let color = theme.primary.bits();
     if pv.highlight.is_none() {
         unsafe {

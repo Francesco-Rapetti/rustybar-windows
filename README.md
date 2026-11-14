@@ -22,7 +22,7 @@ the same ideas, built on Windows' own pieces.
   screen; with every bar hidden, the bar lets go of its devices and sleeps until the game leaves.
   Listed games turn animations off even in a window.
 
-![The left end of the bar: the Windows logo, the virtual desktops, the app in front, the screens' refresh rate, and what's playing](docs/screenshots/bar-left.png)
+![The left end of the bar: the Windows logo, the virtual desktops with an icon per window (the current one highlighted, the window in front on a darker tile), the app in front, the screens' refresh rate, and what's playing](docs/screenshots/bar-left.png)
 
 ![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the batteries side by side, each with its kind, short name, a small bar and its level (a mouse charging, two keyboards, a controller, earbuds that run low, a mouse asleep and dimmed), the network with a VPN, the sound in two parts filled up to their volumes (the earbuds with their battery, and their microphone in use), CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
 
@@ -241,9 +241,19 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
   for a subkey that comes or goes (`RebootRequired`).
 - **front_app**: the name of the app in front, from its executable's version information
   (`Google Chrome`), cut at 260 DIPs. The taskbar and the desktop leave it as it was.
-- **workspaces**: the virtual desktops, the current one under a highlight that slides; a click
-  on one goes there, with Windows' own Ctrl+Win+←/→ (simulated, so not while a listed game is in
-  front). Hidden with a single desktop (`single = true` keeps it).
+- **workspaces**: the virtual desktops, as the macOS bar shows AeroSpace's workspaces: each with
+  its number (or name) and an icon per window on it, in the order the windows came, the current
+  desktop under a highlight that slides, the window in front on a darker tile. A click on a
+  number goes to that desktop, with Windows' own Ctrl+Win+←/→ (simulated, so not while a listed
+  game is in front); on an icon brings that window in front, restored if minimized (Windows goes
+  to its desktop). Compact, only the current desktop has its icons. Hidden with a single desktop
+  (`single = true` keeps it); `icons = false` shows the numbers alone, `max_icons` (8) the icons
+  per desktop before a `+N`. No timer: the shell says when a window comes or goes (a shell hook,
+  as the taskbar has), Explorer which desktop each is on (`IVirtualDesktopManager`, ~70 µs a
+  window, asked only for new ones and when the desktops change), and the icons come from the
+  executables, their windows' class or, for Store apps, their package's logo, never from a
+  message to the app; read once per app. It costs ~1.7 MB more memory (the COM proxies that ask
+  Explorer, and WIC while a Store app is open) and nothing at rest: 0 ms of CPU, 0.03 wake-ups/s.
 - **audio**: a part for the output and one for the input, as on macOS, each with its icon, its
   device's name and its volume, and its background filled up to the volume in the primary color
   (gray when muted). The output's icon goes by its kind (headphones, a display, speakers by how
