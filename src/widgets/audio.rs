@@ -1,5 +1,13 @@
-//! The sound: in the pill the output's icon (by its kind and its volume, crossed out when muted)
-//! and its volume, and the battery of a Bluetooth output. The popup has a tile for the output and
+//! The sound: the pill has a part for the output and one for the input, as the macOS RustyBar has
+//! (`input = false` leaves the output alone), each with its icon, its device's name and its
+//! volume, and its background filled up to the volume in the primary color (gray when muted). The
+//! output's icon goes by its kind and its volume (crossed out when muted), with the battery of a
+//! Bluetooth output after it; the input's is a microphone, in the primary color while an app uses
+//! it and crossed out in red when muted, with the camera after it while an app uses that. One
+//! device for both (a headset: the same container, or the same name) has one name. Windows calls
+//! endpoints `Headphones (Aurora Buds)`: the pill says the device, `Aurora Buds`, unless that's a
+//! sound card (`Speakers (Realtek(R) Audio)` says `Speakers`), or the user's own (`names`). The
+//! compact pill has the icons alone, with the fills. The popup has a tile for the output and
 //! one for the input, each with its name, its volume and a slider (a click or a drag sets it, a
 //! click on the icon mutes), then the outputs and the inputs to switch to (the one in use lit,
 //! the battery of the Bluetooth ones), the sound settings and the volume mixer.
@@ -20,6 +28,7 @@
 //! With made-up data (see `mock`) the devices and volumes are those of `audio.json`: Core Audio
 //! isn't used, the sliders and the mute move the made-up volumes alone, the rest does nothing.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +73,17 @@ pub(super) const BATTERY: DEVPROPKEY = DEVPROPKEY { fmtid: GUID::from_u128(0x104
 
 /// The enumerators of Bluetooth device nodes: classic, hands-free, Low Energy.
 const BLUETOOTH: [&str; 4] = ["BTHENUM", "BTHHFENUM", "BTHLE", "BTHLEDEVICE"];
+
+/// The container of the PC's own devices (`{00000000-0000-0000-FFFF-FFFFFFFFFFFF}`): the sound
+/// card's speakers and microphone jack are in it, but they're not one device.
+const COMPUTER: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+
+/// How much of the primary color fills a part of the pill up to its volume, under the text; and
+/// of the text color when muted.
+const FILL: f32 = 0.3;
+const FILL_MUTED: f32 = 0.1;
+/// The longest a device's name gets in the pill, in DIPs.
+const NAME_WIDTH: f32 = 160.0;
 
 // Segoe Fluent Icons
 const SPEAKER: [&str; 4] = ["\u{E992}", "\u{E993}", "\u{E994}", "\u{E995}"];
@@ -198,6 +218,9 @@ struct Endpoint {
     level: f32,
     muted: bool,
     battery: Option<u8>,
+    /// The device container the endpoint is in: an output and an input in the same one are the
+    /// same device (a headset).
+    container: Option<Vec<u8>>,
 }
 
 impl Endpoint {
@@ -208,7 +231,8 @@ impl Endpoint {
             let callback: IAudioEndpointVolumeCallback = VolumeChanged { wake: wake.clone() }.into();
             unsafe { v.RegisterControlChangeNotify(&callback) }.ok().map(|()| callback)
         });
-        let mut e = Endpoint { battery: None, device: info, volume, callback, level: 0.0, muted: false };
+        let container = container(&info.id);
+        let mut e = Endpoint { battery: None, device: info, volume, callback, level: 0.0, muted: false, container };
         e.read();
         e.read_battery();
         Some(e)
@@ -233,6 +257,11 @@ impl Endpoint {
 
     fn percent(&self) -> u32 {
         (self.level * 100.0).round() as u32
+    }
+
+    /// The fill of its part of the pill: the primary color, or the text's when muted.
+    fn fill(&self, theme: &Theme) -> Rgba {
+        if self.muted { theme.text.alpha(FILL_MUTED) } else { theme.primary.alpha(FILL) }
     }
 
     fn set_level(&mut self, level: f32) {
@@ -293,6 +322,10 @@ pub struct Audio {
     mock: Option<(Vec<Device>, Vec<Device>)>,
     /// The made-up mixer's apps: name, volume, muted, playing.
     mock_apps: Vec<(String, f32, bool, bool)>,
+    /// The input's part in the pill (`input`).
+    input_part: bool,
+    /// The user's names for the pill (`names`), by the full name or the pill's (lowercase).
+    names: HashMap<String, String>,
 }
 
 impl Audio {
@@ -320,6 +353,8 @@ impl Audio {
             mixer: None,
             mock: None,
             mock_apps: Vec::new(),
+            input_part: options.bool("input").unwrap_or(true),
+            names: own_names(options),
         };
         a.attach();
         a
@@ -343,7 +378,7 @@ impl Audio {
                     let level = m[if i == 0 { "output_volume" } else { "input_volume" }].f64().unwrap_or(50.0) as f32 / 100.0;
                     let muted = m[if i == 0 { "output_muted" } else { "input_muted" }].bool().unwrap_or(false);
                     let battery = d["battery"].f64().map(|b| b as u8);
-                    endpoints[i] = Some(Endpoint { device: device.clone(), volume: None, callback: None, level, muted, battery });
+                    endpoints[i] = Some(Endpoint { device: device.clone(), volume: None, callback: None, level, muted, battery, container: None });
                 }
                 lists[i].push(device);
             }
@@ -372,7 +407,82 @@ impl Audio {
                 .iter()
                 .map(|a| (a["name"].str().unwrap_or_default().to_string(), a["volume"].f64().unwrap_or(100.0) as f32 / 100.0, a["muted"].bool().unwrap_or(false), a["active"].bool().unwrap_or(false)))
                 .collect(),
+            input_part: options.bool("input").unwrap_or(true),
+            names: own_names(options),
         }
+    }
+
+    /// A device's name in the pill: the user's (`names`, by the full name or by the pill's), or
+    /// the device's own (see `short_name`).
+    fn name(&self, device: &Device) -> String {
+        let short = short_name(&device.name);
+        self.names.get(&device.name.to_lowercase()).or_else(|| self.names.get(&short.to_lowercase())).cloned().unwrap_or(short)
+    }
+
+    /// The input, when it has its part in the pill.
+    fn input_part(&self) -> Option<&Endpoint> {
+        self.input.as_ref().filter(|_| self.input_part)
+    }
+
+    /// Whether the output and the input are one device (a headset): in the same container, not
+    /// the PC's own, or with the same name in the pill.
+    fn one_device(&self, output: &Endpoint, input: &Endpoint) -> bool {
+        match (&output.container, &input.container) {
+            (Some(a), Some(b)) if a == b && a[..] != COMPUTER[..] => true,
+            _ => self.name(&output.device).to_lowercase() == self.name(&input.device).to_lowercase(),
+        }
+    }
+
+    /// The input's icon in the pill: crossed out in red when muted, in the primary color while
+    /// an app uses the microphone.
+    fn input_icon(&self, theme: &Theme, input: &Endpoint) -> Item {
+        if input.muted {
+            Item::icon(MICROPHONE_OFF, theme.color("red").unwrap_or(theme.text))
+        } else if self.privacy.as_ref().is_some_and(|p| !p.using[0].is_empty()) {
+            Item::icon(MICROPHONE, theme.primary)
+        } else {
+            Item::icon(MICROPHONE, theme.text)
+        }
+    }
+
+    /// The camera, while an app uses it.
+    fn camera_item(&self, theme: &Theme) -> Option<Item> {
+        self.privacy.as_ref().is_some_and(|p| !p.using[1].is_empty()).then(|| Item::icon(CAMERA, theme.primary).space(8.0))
+    }
+
+    /// The pill, full or `compact` (the icons alone): the output's part, and the input's.
+    fn parts(&self, theme: &Theme, compact: bool) -> Option<Pill> {
+        let out = self.output.as_ref()?;
+        let color = if out.muted { theme.subtext } else { theme.text };
+        let mut items = vec![Item::icon(output_icon(out), color)];
+        if !compact {
+            items.push(Item::text(self.name(&out.device), color).max_width(NAME_WIDTH));
+            items.push(Item::text(format!("{}%", out.percent()), color).fixed("100%"));
+        }
+        if let Some(b) = out.battery {
+            let level = battery_color(theme, b, theme.subtext);
+            items.push(Item::icon(battery_icon(b), level).space(if compact { 8.0 } else { 10.0 }));
+            if !compact {
+                items.push(Item::text(format!("{b}%"), level).small().space(2.0));
+            }
+        }
+        let Some(input) = self.input_part() else {
+            // The output alone: the microphone and the camera as before, in its part
+            self.privacy_items(theme, &mut items);
+            return Some(Pill::new(items).gap(6.0).part(0, out.percent() as u8, out.fill(theme)));
+        };
+        let start = items.len();
+        // The pill's padding on either side of the line between the parts
+        items.push(self.input_icon(theme, input).space(2.0 * theme.pill_padding));
+        if !compact {
+            let color = if input.muted { theme.subtext } else { theme.text };
+            if !self.one_device(out, input) {
+                items.push(Item::text(self.name(&input.device), color).max_width(NAME_WIDTH));
+            }
+            items.push(Item::text(format!("{}%", input.percent()), color).fixed("100%"));
+        }
+        items.extend(self.camera_item(theme));
+        Some(Pill::new(items).gap(6.0).part(0, out.percent() as u8, out.fill(theme)).part(start, input.percent() as u8, input.fill(theme)))
     }
 
     /// Registers with Core Audio and reads everything.
@@ -513,26 +623,13 @@ impl Drop for Audio {
 
 impl super::Widget for Audio {
     fn pill(&self, theme: &Theme) -> Option<Pill> {
-        let out = self.output.as_ref()?;
-        let color = if out.muted { theme.subtext } else { theme.text };
-        let mut items = vec![Item::icon(output_icon(out), color), Item::text(format!("{}%", out.percent()), color).fixed("100%")];
-        if let Some(b) = out.battery {
-            items.push(Item::icon(battery_icon(b), battery_color(theme, b, theme.subtext)).space(10.0));
-            items.push(Item::text(format!("{b}%"), battery_color(theme, b, theme.subtext)).small().space(2.0));
-        }
-        self.privacy_items(theme, &mut items);
-        Some(Pill::new(items).gap(6.0))
+        self.parts(theme, false)
     }
 
-    /// The icons alone: the output's, its battery's, the microphone and the camera.
+    /// The icons alone, with the fills: the output's, its battery's, the microphone and the
+    /// camera.
     fn compact(&self, theme: &Theme) -> Option<Pill> {
-        let out = self.output.as_ref()?;
-        let mut items = vec![Item::icon(output_icon(out), if out.muted { theme.subtext } else { theme.text })];
-        if let Some(b) = out.battery {
-            items.push(Item::icon(battery_icon(b), battery_color(theme, b, theme.subtext)));
-        }
-        self.privacy_items(theme, &mut items);
-        Some(Pill::new(items).gap(8.0))
+        self.parts(theme, true)
     }
 
     /// The event of Core Audio's callbacks, the battery's timer, and the registry watches of the
@@ -904,6 +1001,65 @@ fn device_row(scene: &mut Scene, theme: &Theme, fonts: &Fonts, y: f32, device: &
     }
 }
 
+/// The user's names for the pill: `names = { "Headphones (Aurora Buds)" = "Buds" }`, by the full
+/// name the popup shows or by the pill's own, lowercase.
+fn own_names(options: &Options) -> HashMap<String, String> {
+    options
+        .0
+        .get("names")
+        .and_then(|v| v.as_table())
+        .map(|t| t.iter().filter_map(|(k, v)| Some((k.to_lowercase(), v.as_str()?.trim().to_string()))).filter(|(_, v)| !v.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// A device's name for the pill. Windows calls endpoints `<what it is> (<device>)`, `Headphones
+/// (Aurora Buds)`: the device, unless that's a sound card or a driver, `Speakers (Realtek(R)
+/// Audio)`, `1 - Glow 27 (AMD High Definition Audio Device)`, then what it is. The numbers Windows
+/// puts before two of a kind (`2- USB Audio Device`) and before a display (`1 - Glow 27`), and the
+/// words Bluetooth adds (`Stereo`, `Hands-Free AG Audio`, `Hands-Free HF Audio`), are left out.
+fn short_name(name: &str) -> String {
+    /// `2- USB Audio Device` → `USB Audio Device`, `1 - Glow 27` → `Glow 27`.
+    fn unnumbered(s: &str) -> &str {
+        match s.split_once('-') {
+            Some((n, rest)) if !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()) && rest.starts_with(' ') => rest.trim(),
+            _ => s,
+        }
+    }
+    let name = name.trim();
+    let Some(open) = last_group(name) else { return unnumbered(name).to_string() };
+    let what = unnumbered(name[..open].trim());
+    let mut device = unnumbered(name[open + 1..name.len() - 1].trim());
+    if let Some(i) = device.find(" Hands-Free") {
+        device = device[..i].trim();
+    }
+    if let Some(d) = device.strip_suffix(" Stereo") {
+        device = d.trim();
+    }
+    let card = device.split(|c: char| !c.is_alphanumeric()).any(|w| w.eq_ignore_ascii_case("audio"));
+    if device.is_empty() || (card && !what.is_empty()) { what.to_string() } else { device.to_string() }
+}
+
+/// Where the group in parentheses that ends the name starts: `Speakers (Realtek(R) Audio)` → 9.
+fn last_group(name: &str) -> Option<usize> {
+    if !name.ends_with(')') {
+        return None;
+    }
+    let mut depth = 0;
+    for (i, c) in name.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The output's icon: its kind, or for speakers how loud, crossed out when muted.
 fn output_icon(e: &Endpoint) -> &'static str {
     if e.muted {
@@ -1020,11 +1176,17 @@ pub(super) fn device_ids(enumerator: &str) -> Vec<String> {
     }
 }
 
+/// The container of an audio endpoint's device node (`SWD\MMDEVAPI\<id>`): every node of the
+/// same physical device is in it.
+fn container(endpoint: &str) -> Option<Vec<u8>> {
+    property(locate(&format!(r"SWD\MMDEVAPI\{endpoint}"))?, &DEVPKEY_Device_ContainerId)
+}
+
 /// The battery of the Bluetooth device behind an audio endpoint: the endpoint's device node
 /// (`SWD\MMDEVAPI\<id>`) is in the same container as the Bluetooth nodes of the device, one of
 /// which has the level Windows shows in Settings.
 fn bluetooth_battery(endpoint: &str) -> Option<u8> {
-    let container = property(locate(&format!(r"SWD\MMDEVAPI\{endpoint}"))?, &DEVPKEY_Device_ContainerId)?;
+    let container = container(endpoint)?;
     BLUETOOTH
         .iter()
         .flat_map(|e| device_ids(e))
@@ -1038,6 +1200,7 @@ fn bluetooth_battery(endpoint: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Widget;
 
     #[test]
     fn battery_icons_and_colors() {
@@ -1045,5 +1208,69 @@ mod tests {
         assert_eq!(battery_icon(44), "\u{E854}");
         assert_eq!(battery_icon(100), "\u{E83F}");
         assert_eq!(battery_icon(250), "\u{E83F}");
+    }
+
+    #[test]
+    fn short_names() {
+        let names = [
+            ("Headphones (Aurora Buds)", "Aurora Buds"),
+            ("Headset (Aurora Buds Hands-Free AG Audio)", "Aurora Buds"),
+            ("Headphones (Aurora Buds Stereo)", "Aurora Buds"),
+            ("Speakers (Realtek(R) Audio)", "Speakers"),
+            ("Speakers (High Definition Audio Device)", "Speakers"),
+            ("Microphone (2- USB Audio Device)", "Microphone"),
+            ("Microphone (2- Nimbus USB Mic)", "Nimbus USB Mic"),
+            ("Glow 27 (NVIDIA High Definition Audio)", "Glow 27"),
+            ("1 - Glow 27 (AMD High Definition Audio Device)", "Glow 27"),
+            ("Speakers (Aurora Phone Hands-Free HF Audio)", "Aurora Phone"),
+            ("Speakers (Aurora-X)", "Aurora-X"),
+            ("Digital Audio (S/PDIF) (High Definition Audio Device)", "Digital Audio (S/PDIF)"),
+            ("Speakers ()", "Speakers"),
+            ("Line In", "Line In"),
+        ];
+        for (full, short) in names {
+            assert_eq!(short_name(full), short, "{full}");
+        }
+    }
+
+    fn widget(json: &str, options: &str) -> Audio {
+        Audio::mock(&Json::parse(json).unwrap(), &Options(toml::from_str(options).unwrap()))
+    }
+
+    fn texts(pill: &Pill) -> Vec<&str> {
+        pill.items.iter().map(|i| i.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_pill_in_two_parts() {
+        let theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        // A headset: one name, the battery after the output's volume
+        let headset = r#"{"outputs": [{"name": "Headphones (Aurora Buds)", "form": 3, "battery": 15, "default": true}],
+            "inputs": [{"name": "Headset (Aurora Buds)", "form": 5, "default": true}], "output_volume": 40, "input_volume": 70}"#;
+        let pill = widget(headset, "").pill(&theme).unwrap();
+        assert_eq!(texts(&pill), [HEADPHONES, "Aurora Buds", "40%", battery_icon(15), "15%", MICROPHONE, "70%"]);
+        assert_eq!(pill.parts.iter().map(|p| (p.start, p.level)).collect::<Vec<_>>(), [(0, 40), (5, 70)]);
+        assert_eq!(pill.items[5].space, Some(2.0 * theme.pill_padding));
+        assert_eq!(pill.parts[0].color, theme.primary.alpha(FILL));
+        // The compact pill: the icons, with the same fills
+        let compact = widget(headset, "").compact(&theme).unwrap();
+        assert_eq!(texts(&compact), [HEADPHONES, battery_icon(15), MICROPHONE]);
+        assert_eq!(compact.parts.iter().map(|p| (p.start, p.level)).collect::<Vec<_>>(), [(0, 40), (2, 70)]);
+
+        // Two devices: two names; a muted input crossed out in red, gray and filled in gray
+        let two = r#"{"outputs": [{"name": "Speakers (Realtek(R) Audio)", "form": 1, "default": true}],
+            "inputs": [{"name": "Microphone (Nimbus USB Mic)", "form": 4, "default": true}], "output_volume": 100, "input_volume": 5, "input_muted": true}"#;
+        let pill = widget(two, "").pill(&theme).unwrap();
+        assert_eq!(texts(&pill), [SPEAKER[3], "Speakers", "100%", MICROPHONE_OFF, "Nimbus USB Mic", "5%"]);
+        assert_eq!(pill.items[3].color, theme.color("red").unwrap());
+        assert_eq!(pill.items[4].color, theme.subtext);
+        assert_eq!(pill.parts[1].color, theme.text.alpha(FILL_MUTED));
+        // The user's names, by the full name or the pill's; the same name makes one device
+        let pill = widget(two, "names = { \"speakers (realtek(r) audio)\" = \"Desk\", \"Nimbus USB Mic\" = \"Desk\" }").pill(&theme).unwrap();
+        assert_eq!(texts(&pill), [SPEAKER[3], "Desk", "100%", MICROPHONE_OFF, "5%"]);
+        // Without the input: one part, the muted microphone after the output as before
+        let pill = widget(two, "input = false").pill(&theme).unwrap();
+        assert_eq!(texts(&pill), [SPEAKER[3], "Speakers", "100%", MICROPHONE_OFF]);
+        assert_eq!(pill.parts.len(), 1);
     }
 }

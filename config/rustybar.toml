@@ -78,6 +78,10 @@ apps = []                        # e.g. ["wow.exe", "cs2.exe"]
 # cover = true                   # the cover in the popup; false never reads it
 # cover_colors = true            # the popup in the cover's colors; false keeps the theme's
 #
+# [widgets.audio]
+# input = true                   # the input's part in the pill, beside the output's; false: the output alone
+# names = { "Speakers (Realtek(R) Audio)" = "Desk" }  # your names in the pill, by the popup's
+#
 # events isn't in the default layout: it needs your calendars' secret iCal addresses, each in
 # Credential Manager: Get-Clipboard | rustybar secret set events-Work
 # [widgets.events]

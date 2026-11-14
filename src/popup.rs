@@ -11,7 +11,7 @@ use std::sync::Once;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, ID2D1DeviceContext, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectComposition::{IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2, IDCompositionVisual3};
@@ -469,6 +469,13 @@ pub fn paint_shapes(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f
                     brush.SetColor(&gfx::color(*color));
                     let shape = D2D1_ROUNDED_RECT { rect: gfx::rect(rect.x, rect.y, rect.w, rect.h), radiusX: *radius, radiusY: *radius };
                     ctx.FillRoundedRectangle(&shape, brush);
+                }
+                Shape::Cut { rect, radius, color, to } => {
+                    brush.SetColor(&gfx::color(*color));
+                    let shape = D2D1_ROUNDED_RECT { rect: gfx::rect(rect.x, rect.y, rect.w, rect.h), radiusX: *radius, radiusY: *radius };
+                    ctx.PushAxisAlignedClip(&gfx::rect(to.x, to.y, to.w, to.h), D2D1_ANTIALIAS_MODE_ALIASED);
+                    ctx.FillRoundedRectangle(&shape, brush);
+                    ctx.PopAxisAlignedClip();
                 }
                 Shape::Text { rect, text, font, color, align } => {
                     let Ok((layout, tw, th)) = fonts.layout(text, *font, rect.w) else { continue };

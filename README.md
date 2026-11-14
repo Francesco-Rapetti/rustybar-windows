@@ -24,7 +24,7 @@ the same ideas, built on Windows' own pieces.
 
 ![The left end of the bar: the Windows logo, the virtual desktops, the app in front, the screens' refresh rate, and what's playing](docs/screenshots/bar-left.png)
 
-![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the batteries side by side, each with its kind, short name, a small bar and its level (a mouse charging, two keyboards, a controller, earbuds that run low, a mouse asleep and dimmed), the network with a VPN, the sound with the headphones' battery and the microphone in use, CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
+![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the batteries side by side, each with its kind, short name, a small bar and its level (a mouse charging, two keyboards, a controller, earbuds that run low, a mouse asleep and dimmed), the network with a VPN, the sound in two parts filled up to their volumes (the earbuds with their battery, and their microphone in use), CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
 
 ## What it costs
 
@@ -244,10 +244,15 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
 - **workspaces**: the virtual desktops, the current one under a highlight that slides; a click
   on one goes there, with Windows' own Ctrl+Win+←/→ (simulated, so not while a listed game is in
   front). Hidden with a single desktop (`single = true` keeps it).
-- **audio**: the output's icon (headphones, a display, speakers by how loud; crossed out when
-  muted) and its volume, the battery of a Bluetooth output, and the microphone: crossed out in
-  red while the input is muted, lit while an app uses it (and a camera while one uses that), as
-  the taskbar's privacy icon. Its popup: the volume of the
+- **audio**: a part for the output and one for the input, as on macOS, each with its icon, its
+  device's name and its volume, and its background filled up to the volume in the primary color
+  (gray when muted). The output's icon goes by its kind (headphones, a display, speakers by how
+  loud; crossed out when muted), with the battery of a Bluetooth output after it; the input's is
+  the microphone, crossed out in red while muted and lit while an app uses it (with a camera
+  while one uses that), as the taskbar's privacy icon. A headset, one device for both, has one
+  name. Windows calls devices `Headphones (Aurora Buds)`: the pill says `Aurora Buds`, or what it
+  is when the brackets hold the sound card (`Speakers (Realtek(R) Audio)` says `Speakers`);
+  `names` gives your own. Compact: the icons, with the fills. Its popup: the volume of the
   output and of the input, with a slider (click or drag) and mute on the icon; which apps use
   the microphone and the camera; the mixer, every app with sound on the output (a game, a chat,
   a browser) with its slider and mute; the devices to
@@ -257,8 +262,10 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
   through `IPolicyConfig`, the undocumented interface Windows' own sound settings use. Which
   apps use the microphone or the camera comes from the registry Windows keeps for its privacy
   icon, watched for changes, so it wakes the bar only when an app opens or closes one; the mixer
-  exists only while the popup is open. Options: `privacy = false` (no microphone or camera in
-  use), `mixer = false`.
+  exists only while the popup is open. The fills are drawn with the text, only when a volume
+  changes. Options: `input = false` (the output alone), `names = { "Headphones (Aurora Buds)" =
+  "Buds" }` (by the full name the popup shows, or by the pill's), `privacy = false` (no
+  microphone or camera in use), `mixer = false`.
 - **media**: what's playing in any app with a player (`♪ Title  Artist`), from the media
   sessions Windows keeps (the ones of the volume flyout); dimmed with a pause sign while paused
   (`paused = false` hides it), hidden when nothing plays. In the center group, with room to

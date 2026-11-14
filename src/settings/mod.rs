@@ -1515,6 +1515,7 @@ fn paint_diff(surface: &IDCompositionSurface, s: f32, size: (u32, u32), bg: Rgba
 fn bounds(shape: &Shape) -> Rect {
     match shape {
         Shape::Fill { rect, .. } | Shape::Image { rect, .. } | Shape::Para { rect, .. } => *rect,
+        Shape::Cut { to, .. } => *to,
         // Glyphs reach a little past their box
         Shape::Text { rect, .. } => Rect::new(rect.x - 2.0, rect.y - 2.0, rect.w + 4.0, rect.h + 4.0),
     }

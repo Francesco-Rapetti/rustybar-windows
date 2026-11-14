@@ -11,7 +11,7 @@ use std::sync::Once;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
-use windows::Win32::Graphics::Direct2D::{D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1DeviceContext, ID2D1SolidColorBrush};
+use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1DeviceContext, ID2D1SolidColorBrush};
 use windows::Win32::Graphics::DirectComposition::{IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2};
 use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONULL, MonitorFromWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -409,7 +409,7 @@ impl Bar {
                 pv.background_sig = background_sig;
             }
             if pv.text_sig != text_sig {
-                draw_text(&pv.text, s, theme, m)?;
+                draw_text(&pv.text, s, theme, m, size.0 as f32 / s)?;
                 pv.text_sig = text_sig;
             }
             highlight(gfx, pv, m, theme, s, animate && !fresh)?;
@@ -533,18 +533,37 @@ pub fn paint_pill(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32
             brush.SetColor(&gfx::color(theme.primary));
             ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: tile, radiusX: h / 2.0, radiusY: h / 2.0 }, brush);
         }
-        paint_text(ctx, brush, s, theme, m);
+        paint_text(ctx, brush, s, theme, m, m.width);
         ctx.SetTransform(&Matrix3x2::identity());
     }
 }
 
-fn draw_text(surface: &IDCompositionSurface, s: f32, theme: &Theme, m: &Measured) -> Result<()> {
-    gfx::draw(surface, s, |ctx, brush| paint_text(ctx, brush, s, theme, m))
+fn draw_text(surface: &IDCompositionSurface, s: f32, theme: &Theme, m: &Measured, w: f32) -> Result<()> {
+    gfx::draw(surface, s, |ctx, brush| paint_text(ctx, brush, s, theme, m, w))
 }
 
-fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, theme: &Theme, m: &Measured) {
+/// The items of a pill `w` DIPs wide (its background's width), over its parts' fills and lines.
+fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, theme: &Theme, m: &Measured, w: f32) {
     let height = theme.pill_height;
     unsafe {
+        if !m.pill.parts.is_empty() {
+            // The fills take the pill's shape inside the border, cut where each level ends
+            let b = theme.pill_border;
+            let r = (theme.pill_radius - b).max(0.0);
+            let inside = D2D1_ROUNDED_RECT { rect: gfx::rect(b, b, w - 2.0 * b, height - 2.0 * b), radiusX: r, radiusY: r };
+            for (part, (fill, line)) in m.pill.parts.iter().zip(crate::ui::parts(m, w, height, b, s)) {
+                if let Some(f) = fill {
+                    brush.SetColor(&gfx::color(part.color));
+                    ctx.PushAxisAlignedClip(&gfx::rect(f.x, f.y, f.w, f.h), D2D1_ANTIALIAS_MODE_ALIASED);
+                    ctx.FillRoundedRectangle(&inside, brush);
+                    ctx.PopAxisAlignedClip();
+                }
+                if let Some(l) = line {
+                    brush.SetColor(&gfx::color(theme.surface));
+                    ctx.FillRectangle(&gfx::rect(l.x, l.y, l.w, l.h), brush);
+                }
+            }
+        }
         for (item, placed) in m.pill.items.iter().zip(&m.items) {
             brush.SetColor(&gfx::color(item.color));
             if let Some(image) = &item.image {

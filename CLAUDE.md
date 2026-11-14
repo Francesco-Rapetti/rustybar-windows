@@ -229,7 +229,12 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
 - `gfx.rs` (D3D11 WARP, D2D, DirectComposition, `draw` in DIP alla scala dello schermo), `ui.rs`
   (`Pill` di `Item` di testo, misurati con DirectWrite: `small`, `fixed` = largo almeno quanto un
   testo modello e allineato a sinistra, `space` = spazio prima dell'item; `Pill::bare` = senza
-  sfondo né bordo, stessa misura e stessa area del clic, anche nel popup ⋯; `Scene` e `Fonts` dei
+  sfondo né bordo, stessa misura e stessa area del clic, anche nel popup ⋯; `Pill::part` = una
+  parte della pill da un item in poi, il cui sfondo si riempie da sinistra fino a un livello in
+  un colore (il volume di `audio`), tagliata alla forma della pill dentro il bordo, con una linea
+  nel colore del bordo prima delle parti dopo la prima: `ui::parts` dà dove, disegnata col testo
+  in `bar::paint_text` (`PushAxisAlignedClip` sul rettangolo arrotondato) e nel popup ⋯ con
+  `Shape::Cut`, nella firma del testo; `Scene` e `Fonts` dei
   popup, `Backdrop` per i colori propri di un popup), `palette.rs` (i colori di un'immagine in
   Oklab, per il popup di `media`), `theme.rs` (le 24 palette copiate dalla versione macOS + `windows` dal registro:
   `AppsUseLightTheme`, `Accent\AccentPalette`; `level` per giallo e rosso, `tile` per i riquadri
@@ -260,7 +265,7 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   suo ⋯); su una senza popup che fa qualcosa (`Widget::clickable`: `workspaces`) → il clic
   sull'elemento, come nella barra. `msg query` dice `compact:` e `in ⋯left:`; `msg popup ⋯right`
   apre il popup. Forme compatte: `clock` l'ora, `front_app` a 120 DIP, `media` il titolo a 110,
-  `network` le icone, `audio` le icone (uscita e batteria), `system` la RAM, `claude` la
+  `network` le icone, `audio` le icone coi riempimenti, `system` la RAM, `claude` la
   sessione.
 - COM: il thread principale è un apartment STA (`CoInitializeEx` in `app::run`, il ciclo ne
   pompa i messaggi). I callback di Core Audio e i gestori WinRT arrivano su thread loro: toccano
@@ -389,10 +394,24 @@ dati.
   processo (un handle per processo × motori × 0,3 ms), temperatura della CPU (solo WMI o un
   driver), icone delle app.
 - `audio` (fatto, confermato con l'utente: due widget, `audio` e `media`; niente rotella;
-  batteria Bluetooth anche nella pill): pill con l'icona dell'uscita (per tipo: cuffie, cuffie
-  con microfono, schermo HDMI/DP, altoparlanti per livello; barrata se muta) e il volume
-  (`fixed("100%")`, grigio se muto); con un'uscita Bluetooth la batteria (icona a decimi di
-  Segoe Fluent Icons, gialla al 20%, rossa al 10%). Popup (320 DIP): un riquadro per l'uscita e
+  batteria Bluetooth anche nella pill): pill in due parti, come su macOS (chiesto dall'utente il
+  14/11/2026: i nomi delle sorgenti e il volume come riempimento della pill; scelta da una bozza
+  la disposizione «B», una parte per uscita e ingresso, con la tinta): ogni parte con l'icona, il
+  nome del dispositivo (tagliato a 160 DIP) e il volume (`fixed("100%")`, grigio se muto), e lo
+  sfondo riempito fino al volume nel `primary` al 30% (il colore del testo al 10% se muto;
+  `Pill::part`); fra le due la linea del bordo e il `pill_padding` per lato. Uscita: l'icona per
+  tipo (cuffie, cuffie con microfono, schermo HDMI/DP, altoparlanti per livello; barrata se
+  muta); con un'uscita Bluetooth la batteria (icona a decimi di Segoe Fluent Icons, gialla al
+  20%, rossa al 10%) dopo il volume. Ingresso: il microfono, rosso barrato se muto, `primary` se
+  un'app lo usa, poi la fotocamera se un'app la usa. Un dispositivo solo (stesso contenitore,
+  non quello del PC `{…FFFF-FFFFFFFFFFFF}` dove stanno altoparlanti e microfono della scheda
+  audio, o lo stesso nome) ha il nome una volta. Il nome (`short_name`): Windows chiama gli
+  endpoint `Cuffie (Aurora Buds)`; la parte fra parentesi, salvo quando è la scheda o il driver
+  (una parola `Audio`: `Altoparlanti (High Definition Audio Device)` → `Altoparlanti`), senza i
+  numeri di Windows (`2- `, `1 - ` dei monitor) né `Stereo`/`Hands-Free…` del Bluetooth; o quello
+  dell'utente, `names` (per nome completo o della pill, dalla pagina del widget). `input =
+  false`: la sola uscita, col microfono e la fotocamera come prima. Compatta: le icone coi
+  riempimenti. Popup (320 DIP): un riquadro per l'uscita e
   uno per l'ingresso (icona = muto con un clic, nome, percentuale, cursore stile Windows 11 che
   si clicca o si trascina: `Zone::slider`, `Input::Slide`, cattura del mouse durante il
   trascinamento; alzarlo toglie il muto), poi «Uscita» e «Ingresso»: i dispositivi attivi in
@@ -1492,3 +1511,17 @@ Fatto (13/11/2026), com'è fatto:
   Poi i colori a scala (sopra, «Aspetto»): test 101 (`colors_of_levels`), screenshot rifatti,
   reinstallata. Dopo ogni reinstallazione chi dormiva (MX Master 4, Falcata) torna nella pill solo
   quando risponde a un giro: `last` riparte vuoto.
+- 14/11/2026, **pill di `audio` in due parti** (chiesto dall'utente: i nomi come su macOS e il
+  volume come riempimento; bozze A/B e due stili mostrate, scelta «B con la tinta»; com'è fatta
+  sotto `audio` e in `ui.rs`). Provata coi dati finti (`msg shot bar:right`, il popup ⋯ con un
+  margine grande, la compatta con `always_compact` fotografata dallo schermo), con una copia dei
+  dati finti a due dispositivi e il microfono muto, e su una barra di prova coi dispositivi veri:
+  i nomi tolti da `High Definition Audio Device` e da `2- `. Trovati provando coi nomi veri: i
+  monitor si chiamano `1 - <nome> (AMD High Definition Audio Device)` e il vivavoce Bluetooth
+  `… Hands-Free HF Audio`: tolti tutti e due. Barra di prova con `audio` e l'orologio, a riposo
+  per 60 s: 4,8 MB privati, 7,8 MB committed, 0 ms di CPU, 0,27 risvegli/s, 5 thread, 0 figli;
+  primo frame 43 ms. Il riempimento si ridisegna col testo, che si ridisegnava già a ogni cambio
+  di volume. Binario 3,44 MB. Test 104, più 3 ignorati (nuovi: nomi, pill in due parti,
+  geometria delle parti), clippy senza avvisi. `bar-right.png` rifatto. Non provati: un cambio
+  di volume dal vivo (cambierebbe il PC), il tema chiaro, una scala diversa dal 100%. Niente
+  committato né installato.

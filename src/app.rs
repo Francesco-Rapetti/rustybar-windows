@@ -46,7 +46,7 @@ use crate::popup::{Anchor, Popup, Side};
 use crate::process;
 use crate::theme::Theme;
 use crate::fit::{self, Fitted, Form, Room};
-use crate::ui::{Align, Font, Item, Measured, Pill, Rect, Scene, Text, Weight};
+use crate::ui::{Align, Font, Item, Measured, Pill, Rect, Scene, Shape, Text, Weight};
 use crate::widgets::front_app::{self, Foreground, Names};
 use crate::widgets::{self, Input, Reply, Signal, Widget};
 
@@ -1463,6 +1463,16 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
         scene.fill(Rect::new(x + b, y + b, m.width - 2.0 * b, t.pill_height - 2.0 * b), (t.pill_radius - b).max(0.0), t.base);
     } else if !m.pill.bare {
         scene.fill(Rect::new(x, y, m.width, t.pill_height), t.pill_radius, t.base);
+    }
+    // The parts' fills, in the pill's shape inside the border, and the lines between them
+    let inside = Rect::new(x + b, y + b, m.width - 2.0 * b, t.pill_height - 2.0 * b);
+    for (part, (fill, line)) in m.pill.parts.iter().zip(crate::ui::parts(m, m.width, t.pill_height, b, 1.0)) {
+        if let Some(f) = fill {
+            scene.shapes.push(Shape::Cut { rect: inside, radius: (t.pill_radius - b).max(0.0), color: part.color, to: Rect::new(x + f.x, y + f.y, f.w, f.h) });
+        }
+        if let Some(l) = line {
+            scene.fill(Rect::new(x + l.x, y + l.y, l.w, l.h), 0.0, t.surface);
+        }
     }
     if let Some(p) = m.pill.highlight.and_then(|i| m.items.get(i)) {
         let h = t.pill_height - 2.0 * bar::HIGHLIGHT_Y;

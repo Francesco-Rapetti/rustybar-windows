@@ -51,9 +51,10 @@ fn pinned(f: &mut Form, title: &str, spot: Spot, kind: &'static str) {
     );
 }
 
-/// `devices`' own names for the pill, by the full name the popup shows: a field for each (empty
-/// takes it away, as the bin does), and one that adds `full name = short name`.
-fn names(f: &mut Form, spot: Spot) {
+/// The user's own names for a pill (`devices`, `audio`), by the full name the popup shows: a
+/// field for each (empty takes it away, as the bin does), and one that adds `full name = short
+/// name`; `about` says what the pill shows without one, `example` is a line to add.
+fn names(f: &mut Form, spot: Spot, about: &'static str, example: &str) {
     f.group(Some(t("Nomi nella barra", "Names in the bar")));
     for full in store::keys(&spot) {
         let at = spot.k(&full);
@@ -73,13 +74,10 @@ fn names(f: &mut Form, spot: Spot) {
     }
     f.row(
         t("Aggiungi un nome", "Add a name"),
-        Some(t(
-            "Il nome completo come nel popup, «=», e quello da mostrare nella barra; senza, il modello senza il produttore (Naga, Falcata)",
-            "The full name as in the popup, «=», and the one to show in the bar; without one, the model without its maker (Naga, Falcata)",
-        )),
+        Some(about),
         Control::Text {
             value: String::new(),
-            placeholder: "Razer Naga V2 Pro = Naga".into(),
+            placeholder: example.into(),
             width: 260.0,
             run: Rc::new(move |line: String| {
                 if let Some((full, short)) = line.split_once('=')
@@ -186,9 +184,19 @@ pub fn widget(f: &mut Form, name: &str, ctx: &Ctx) {
         }
         "audio" => {
             f.group(None);
+            toggle(f, t("Ingresso nella pill", "Input in the pill"), Some(t("Una parte per il microfono, col suo nome e il suo volume, accanto a quella dell'uscita", "A part for the microphone, with its name and its volume, beside the output's")), table.k("input"), true);
             toggle(f, t("Microfono e fotocamera in uso", "Microphone and camera in use"), Some(t("Un'icona nella pill quando un'app li usa, e quali nel popup (dal registro di Windows, a eventi)", "An icon in the pill while an app uses them, and which in the popup (from Windows' registry, on events)")), table.k("privacy"), true);
             toggle(f, t("Mixer", "Mixer"), Some(t("Il volume di ogni app nel popup, letto solo mentre è aperto", "Each app's volume in the popup, read only while it's open")), table.k("mixer"), true);
-            &["privacy", "mixer"]
+            names(
+                f,
+                table.k("names"),
+                t(
+                    "Il nome completo come nel popup (o quello della pill), «=», e quello da mostrare; senza, il dispositivo fra parentesi (Aurora Buds), o cos'è se lì c'è la scheda audio (Speakers)",
+                    "The full name as in the popup (or the pill's), «=», and the one to show; without one, the device in brackets (Aurora Buds), or what it is when that's the sound card (Speakers)",
+                ),
+                "Headphones (Aurora Buds) = Buds",
+            );
+            &["input", "privacy", "mixer", "names"]
         }
         "display" => {
             f.group(None);
@@ -203,7 +211,15 @@ pub fn widget(f: &mut Form, name: &str, ctx: &Ctx) {
             for (kind, title) in [("mouse", t("Mouse", "Mice")), ("keyboard", t("Tastiere", "Keyboards")), ("controller", t("Controller", "Controllers"))] {
                 pinned(f, title, table.k("pinned"), kind);
             }
-            names(f, table.k("names"));
+            names(
+                f,
+                table.k("names"),
+                t(
+                    "Il nome completo come nel popup, «=», e quello da mostrare nella barra; senza, il modello senza il produttore (Naga, Falcata)",
+                    "The full name as in the popup, «=», and the one to show in the bar; without one, the model without its maker (Naga, Falcata)",
+                ),
+                "Razer Naga V2 Pro = Naga",
+            );
             f.group(Some(t("Ricevitori e cavi", "Receivers and cables")));
             toggle(
                 f,

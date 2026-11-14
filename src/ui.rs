@@ -36,6 +36,11 @@ pub struct Item {
     pub logo: bool,
     /// A picture (a cover), a square as tall as the theme's font is big, with rounded corners.
     pub image: Option<Arc<Image>>,
+    /// The radius of the picture's corners: 4 for a cover, 0 for an app's icon (its own shape).
+    pub image_radius: f32,
+    /// A rounded tile behind the item, in this color (the window in front, among the icons of
+    /// `workspaces`).
+    pub tile: Option<Rgba>,
     /// Drawn in place of text: a level as a small bar, a thin line between groups.
     pub drawn: Option<Drawn>,
 }
@@ -55,7 +60,7 @@ pub const GAUGE_WIDTH: f32 = 20.0;
 
 impl Item {
     pub fn text(text: impl Into<String>, color: Rgba) -> Item {
-        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false, image: None, drawn: None }
+        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false, image: None, image_radius: 4.0, tile: None, drawn: None }
     }
 
     /// A level as a small bar, `fill` over a `track`.
@@ -82,6 +87,17 @@ impl Item {
     /// A picture `size` DIPs on a side (a cover), in place of text.
     pub fn image(image: Arc<Image>, size: f32) -> Item {
         Item { image: Some(image), min_width: size, ..Item::text("", Rgba::TRANSPARENT) }
+    }
+
+    /// An app's icon `size` DIPs on a side: a picture with square corners, its own shape.
+    pub fn app_icon(image: Arc<Image>, size: f32) -> Item {
+        Item { image_radius: 0.0, ..Item::image(image, size) }
+    }
+
+    /// A rounded tile behind the item, in `color`.
+    pub fn tile(mut self, color: Rgba) -> Item {
+        self.tile = Some(color);
+        self
     }
 
     /// In the theme's small font.
@@ -118,15 +134,37 @@ pub struct Pill {
     /// The item under the highlight, a rounded tile in the primary color that slides from one
     /// item to the next.
     pub highlight: Option<usize>,
+    /// The last item under the highlight, when it covers more than one (a desktop's number and
+    /// the icons of its windows).
+    pub highlight_end: Option<usize>,
     /// Drawn without the background and the border: the items stand on the desktop alone, as
     /// the Apple logo does in the macOS menu bar. The pill keeps its size, so its place and the
     /// area that takes a click stay the same.
     pub bare: bool,
+    /// Parts whose background fills up with a level (see `Part`), in the order of their items.
+    pub parts: Vec<Part>,
+}
+
+/// A part of a pill whose background fills up from its left edge with a level, under the text
+/// (a volume): from item `start` up to the next part's first item (or the pill's end), `level` of
+/// 100 filled in `color`, cut to the pill's rounded shape. A thin line in the border's color sets
+/// it apart from the part before; the room between two parts is the first item's `space`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Part {
+    pub start: usize,
+    pub level: u8,
+    pub color: Rgba,
 }
 
 impl Pill {
     pub fn new(items: Vec<Item>) -> Pill {
-        Pill { items, gap: 6.0, highlight: None, bare: false }
+        Pill { items, gap: 6.0, highlight: None, highlight_end: None, bare: false, parts: Vec::new() }
+    }
+
+    /// A part from item `start` on, filled to `level` (0–100) in `color` (see `Part`).
+    pub fn part(mut self, start: usize, level: u8, color: Rgba) -> Pill {
+        self.parts.push(Part { start, level: level.min(100), color });
+        self
     }
 
     pub fn bare(mut self) -> Pill {
@@ -143,6 +181,32 @@ impl Pill {
         self.highlight = Some(index);
         self
     }
+
+    /// The highlight over the items from `first` to `last`, both in.
+    pub fn highlight_span(mut self, first: usize, last: usize) -> Pill {
+        self.highlight = Some(first);
+        self.highlight_end = Some(last.max(first));
+        self
+    }
+}
+
+impl Measured {
+    /// Where the highlight's items are in the pill, in DIPs: from the first one's left edge, and
+    /// how wide together. None without a highlight.
+    pub fn highlighted(&self) -> Option<(f32, f32)> {
+        let first = self.items.get(self.pill.highlight?)?;
+        let end = self.pill.highlight_end.unwrap_or(self.pill.highlight?).min(self.items.len() - 1);
+        let last = self.items.get(end).filter(|l| l.x >= first.x).unwrap_or(first);
+        Some((first.x, last.x + last.width - first.x))
+    }
+}
+
+/// The tile behind an item `width` DIPs wide at `x` in a pill `height` tall: as tall as the item
+/// is wide plus 2 DIPs a side, centered, on whole pixels at `scale`. Its corner radius second.
+pub fn tile_rect(x: f32, width: f32, height: f32, scale: f32) -> (Rect, f32) {
+    let px = |v: f32| (v * scale).round() / scale;
+    let side = width + 4.0;
+    (Rect::new(px(x - 2.0), px((height - side) / 2.0), px(side), px(side)), 5.0)
 }
 
 /// A laid out item: where it starts in the pill, how wide it is, and its text ready to draw.
@@ -248,7 +312,14 @@ impl Text {
         let mut items = Vec::with_capacity(pill.items.len());
         let mut h = DefaultHasher::new();
         self.font_sig.hash(&mut h);
-        pill.highlight.hash(&mut h);
+        (pill.highlight, pill.highlight_end).hash(&mut h);
+        // The parts are drawn with the text, cut to the pill's shape, with lines in the border's color
+        for p in &pill.parts {
+            (p.start, p.level, p.color.bits()).hash(&mut h);
+        }
+        if !pill.parts.is_empty() {
+            (theme.surface.bits(), theme.pill_radius.to_bits(), theme.pill_border.to_bits(), theme.pill_height.to_bits()).hash(&mut h);
+        }
         for (i, item) in pill.items.iter().enumerate() {
             if i > 0 {
                 x += item.space.unwrap_or(pill.gap);
@@ -262,7 +333,8 @@ impl Text {
                 }
             };
             (item.text.as_str(), item.color.bits(), item.small, item.icon, item.logo, width.to_bits(), text_x.to_bits()).hash(&mut h);
-            item.image.as_ref().map(|i| i.id).hash(&mut h);
+            item.image.as_ref().map(|i| (i.id, item.image_radius.to_bits())).hash(&mut h);
+            item.tile.map(|c| c.bits()).hash(&mut h);
             item.drawn.map(|d| match d {
                 Drawn::Gauge(level, fill) => (1u8, level, fill.bits()),
                 Drawn::Rule => (2u8, 0, 0),
@@ -312,6 +384,33 @@ pub fn drawn(drawn: Drawn, x: f32, y: f32, w: f32, h: f32, size: f32, scale: f32
             (Rect::new(px(x + w / 2.0) / scale, top / scale, 1.0 / scale, height / scale), 0.0, None)
         }
     }
+}
+
+/// Where the parts of a pill `w` DIPs wide and `h` tall go, lined up with the pixels at `scale`:
+/// for each, the rectangle its fill is cut to (none when empty; the fill is the pill's shape
+/// inside the border, cut to it), and the line before it (none for the first). A part starts
+/// halfway between its first item and the item before it, or at the pill's left edge, and ends
+/// where the next one starts, or at the pill's right edge.
+pub fn parts(m: &Measured, w: f32, h: f32, border: f32, scale: f32) -> Vec<(Option<Rect>, Option<Rect>)> {
+    let px = |v: f32| (v * scale).round() / scale;
+    let edge = |i: usize| match (i.checked_sub(1).and_then(|i| m.items.get(i)), m.items.get(i)) {
+        (Some(a), Some(b)) => px((a.x + a.width + b.x) / 2.0),
+        (None, _) => 0.0,
+        (_, None) => w,
+    };
+    let parts = &m.pill.parts;
+    parts
+        .iter()
+        .enumerate()
+        .map(|(n, p)| {
+            let left = edge(p.start);
+            let right = parts.get(n + 1).map_or(w, |q| edge(q.start));
+            let filled = px(left + (right - left) * p.level as f32 / 100.0).min(right);
+            let fill = (filled > left).then(|| Rect::new(left, 0.0, filled - left, h));
+            let line = (n > 0).then(|| Rect::new(left, border, 1.0 / scale, h - 2.0 * border));
+            (fill, line)
+        })
+        .collect()
 }
 
 // ---- popups ------------------------------------------------------------------------------------
@@ -410,6 +509,8 @@ impl PartialEq for Image {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Fill { rect: Rect, radius: f32, color: Rgba },
+    /// A filled rounded rectangle cut to `to`: a pill's part filled up to its level.
+    Cut { rect: Rect, radius: f32, color: Rgba, to: Rect },
     Text { rect: Rect, text: String, font: Font, color: Rgba, align: Align },
     /// A picture stretched over the rectangle, with its corners rounded.
     Image { rect: Rect, radius: f32, image: Arc<Image> },
@@ -498,6 +599,7 @@ impl Scene {
         for shape in other.shapes {
             self.shapes.push(match shape {
                 Shape::Fill { rect, radius, color } => Shape::Fill { rect: moved(rect), radius, color },
+                Shape::Cut { rect, radius, color, to } => Shape::Cut { rect: moved(rect), radius, color, to: moved(to) },
                 Shape::Text { rect, text, font, color, align } => Shape::Text { rect: moved(rect), text, font, color, align },
                 Shape::Image { rect, radius, image } => Shape::Image { rect: moved(rect), radius, image },
                 Shape::Para { rect, text, font, color } => Shape::Para { rect: moved(rect), text, font, color },
@@ -523,6 +625,12 @@ impl Scene {
                 Shape::Fill { rect, radius, color } => {
                     0u8.hash(&mut h);
                     rect.hash_into(&mut h);
+                    (radius.to_bits(), color.bits()).hash(&mut h);
+                }
+                Shape::Cut { rect, radius, color, to } => {
+                    4u8.hash(&mut h);
+                    rect.hash_into(&mut h);
+                    to.hash_into(&mut h);
                     (radius.to_bits(), color.bits()).hash(&mut h);
                 }
                 Shape::Text { rect, text, font, color, align } => {
@@ -644,6 +752,33 @@ fn has_family(factory: &IDWriteFactory, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two parts: the first from the pill's left edge, the second from halfway into the room
+    /// before its first item, each filled to its level on whole pixels, a line before the second.
+    #[test]
+    fn parts_of_a_pill() {
+        let theme = Theme::from_config(&crate::config::ThemeConfig::default());
+        let text = Text::new(&theme).unwrap();
+        let pill = Pill::new(vec![Item::text("Aurora", theme.text), Item::text("40%", theme.text), Item::text("70%", theme.text).space(20.0)])
+            .part(0, 40, theme.primary)
+            .part(2, 100, theme.primary);
+        let m = text.measure("audio", pill, &theme).unwrap();
+        for scale in [1.0, 1.25, 1.5] {
+            let parts = parts(&m, m.width, 28.0, 1.0, scale);
+            let middle = ((m.items[1].x + m.items[1].width + 10.0) * scale).round() / scale;
+            let (fill, line) = parts[0];
+            let fill = fill.unwrap();
+            assert_eq!((fill.x, fill.w), (0.0, ((middle * 0.4) * scale).round() / scale), "{scale}");
+            assert!(line.is_none());
+            let (fill, line) = parts[1];
+            let fill = fill.unwrap();
+            assert_eq!((fill.x, fill.x + fill.w), (middle, m.width), "{scale}");
+            assert_eq!(line.unwrap().x, middle);
+        }
+        // An empty part has no fill
+        let m = text.measure("audio", Pill::new(vec![Item::text("0%", theme.text)]).part(0, 0, theme.primary), &theme).unwrap();
+        assert_eq!(parts(&m, m.width, 28.0, 1.0, 1.0)[0].0, None);
+    }
 
     /// Four equal squares on whole pixels, a gap between them, centered in the box.
     #[test]
