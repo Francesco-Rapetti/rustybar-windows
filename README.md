@@ -24,7 +24,7 @@ the same ideas, built on Windows' own pieces.
 
 ![The left end of the bar: the Windows logo, the virtual desktops with an icon per window (the current one highlighted, the window in front on a darker tile), the app in front, the screens' refresh rate, and what's playing](docs/screenshots/bar-left.png)
 
-![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the batteries side by side, each with its kind, short name, a small bar and its level (a mouse charging, two keyboards, a controller, earbuds that run low, a mouse asleep and dimmed), the network with a VPN, the sound in two parts filled up to their volumes (the earbuds with their battery, and their microphone in use), CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
+![The right end of the bar: Home Assistant, the next event, Docker, two Claude accounts, the batteries side by side, each with its kind, short name, a small bar and its level (a mouse charging, two keyboards, a controller, earbuds that run low, a mouse asleep and dimmed), the chevron of the hidden icons, the network with a VPN, the sound in two parts filled up to their volumes (the earbuds with their battery, and their microphone in use), CPU, GPU and memory, the clock](docs/screenshots/bar-right.png)
 
 ## What it costs
 
@@ -401,6 +401,14 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
   configuration is read at the start and when Windows says the screens changed; the rates and
   the brightness only when the popup opens, the brightness on a worker thread (~60 ms a monitor
   over its cable; `brightness = false` leaves it out). Nothing runs at rest.
+- **tray** (not in the default layout): the chevron of the taskbar's hidden icons. A click opens
+  Windows' own flyout of the hidden icons, down on the taskbar, where the icons work as they
+  always do (it's Windows' flyout, not a copy); another click closes it. The icons can't be in
+  the bar itself: a click on a tray icon is a message only the taskbar knows how to send, and
+  Windows 11 tells it to no one else. The widget finds the taskbar's button through UI
+  Automation on a worker thread, only at a click (~15 ms, ~40 ms the first time); nothing runs
+  at rest. With every icon on the taskbar, or the hidden icons menu turned off in Settings >
+  Personalization > Taskbar, there's no flyout to open.
 
 `rustybar secret set|delete|check <name>` keeps the secrets of the widgets in Credential Manager
 (as `rustybar-<name>`), from stdin, so they never go through the command line or a file.

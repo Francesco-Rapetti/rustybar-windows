@@ -28,10 +28,11 @@ pub mod network;
 pub mod power;
 mod privacy;
 pub mod system;
+pub mod tray;
 pub mod workspaces;
 
 /// The kinds `create` knows.
-pub const KINDS: &[&str] = &["audio", "claude", "clock", "devices", "display", "docker", "events", "front_app", "home", "media", "network", "power", "system", "workspaces"];
+pub const KINDS: &[&str] = &["audio", "claude", "clock", "devices", "display", "docker", "events", "front_app", "home", "media", "network", "power", "system", "tray", "workspaces"];
 
 /// What happened, for every widget.
 pub enum Signal<'a> {
@@ -176,6 +177,7 @@ pub fn create(kind: &str, options: &Options) -> Option<Box<dyn Widget>> {
         "events" => Some(Box::new(events::Events::new(options))),
         "home" => Some(Box::new(home::Home::new(options))),
         "system" => Some(Box::new(system::System::new(options))),
+        "tray" => Some(Box::new(tray::Tray::new())),
         "workspaces" => Some(Box::new(workspaces::Workspaces::new(options))),
         _ => None,
     }

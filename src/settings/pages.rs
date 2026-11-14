@@ -57,6 +57,7 @@ pub fn info(kind: &str) -> (&'static str, &'static str, &'static str) {
         "docker" => ("Docker", "\u{E7B8}", t("I container, coi pulsanti per gestirli, e lo spazio da pulire.", "The containers, with buttons to manage them, and the space to clean up.")),
         "display" => (t("Schermi", "Displays"), "\u{E7F4}", t("La frequenza dello schermo; nel popup frequenze, HDR e luminosità.", "The screen's refresh rate; rates, HDR and brightness in the popup.")),
         "devices" => (t("Batterie", "Batteries"), "\u{E702}", t("Le batterie di mouse, tastiere e controller, anche dietro un ricevitore o un cavo, e dei dispositivi Bluetooth: nella barra i tipi scelti, gli altri quando si scaricano.", "The batteries of mice, keyboards and controllers, behind a receiver or a cable too, and of the Bluetooth devices: the kinds chosen in the bar, the others when they run low.")),
+        "tray" => (t("Icone nascoste", "Hidden icons"), "\u{E70E}", t("La freccia delle icone nascoste della barra delle applicazioni: un clic apre la tendina di Windows, dove le icone funzionano come sempre.", "The taskbar's hidden icons chevron: a click opens Windows' flyout, where the icons work as always.")),
         _ => ("", "\u{E943}", t("Un widget scritto in Lua, in widgets\\ accanto alla config.", "A widget written in Lua, in widgets\\ next to the config.")),
     }
 }
@@ -650,7 +651,7 @@ fn addable(used: &[String], lua: &[String]) -> Vec<Opt> {
     }
     for kind in crate::widgets::KINDS {
         // One of a kind is enough for these
-        if matches!(*kind, "power" | "workspaces" | "front_app" | "media" | "network" | "audio") {
+        if matches!(*kind, "power" | "workspaces" | "front_app" | "media" | "network" | "audio" | "tray") {
             continue;
         }
         if used.iter().any(|n| kind_of(n) == *kind) {

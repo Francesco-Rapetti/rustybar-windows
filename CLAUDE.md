@@ -158,7 +158,10 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   Per i popup (e per il README) meglio `rustybar msg shot <widget> <file.png> [scala]`: la barra
   li disegna fuori schermo, niente dello schermo dell'utente nella foto. La barra finta:
   `RUSTYBAR_MOCK`, `RUSTYBAR_CONFIG_DIR` = `examples\mock` e `RUSTYBAR_LOCALE=en-US` (sezione
-  «Made-up data» del README); log `rustybar-mock.log`.
+  «Made-up data» del README); log `rustybar-mock.log`. Da PowerShell coi percorsi
+  assoluti: da Git Bash (o in background) la barra rovesciata di `examples\mock` si perde, la
+  cartella diventa `examplesmock` e la barra parte con la config predefinita, che riserva lo
+  spazio (successo il 14/11/2026).
 - La finestra delle impostazioni: le pagine si guardano con `rustybar settings --shot <pagina>
   <file.png> [scala] [larghezza]` (fuori schermo, come `msg shot`; con `RUSTYBAR_MOCK` la config
   finta di `examples\mock\settings`). Per provarla dal vivo senza disturbare: la cartella di una
@@ -1229,6 +1232,34 @@ lettura. Senza barre visibili hook e gestore tolti. Clic su un'icona: `ShowWindo
 Dati finti: `windows` in `workspaces.json` (glifi di Segoe Fluent Icons e colori della palette),
 `front`. Pagina del widget: «Icone delle app», «Icone per desktop». `bar-left.png` rifatto.
 
+## Icone nascoste del tray, `tray` (decise con l'utente il 14/11/2026)
+
+L'utente voleva un widget col system tray (la tendina delle icone nascoste) e le icone
+cliccabili come nel tray. Sonde di sola lettura: il tray di Windows 11 è XAML (`TrayNotifyWnd`
+c'è ma è vuota, niente toolbar da leggere); `ITrayNotify` (proxy registrato, si crea in 5 ms)
+non manda nessuna icona su questa build; `HKCU\Control Panel\NotifyIconSettings` ricorda le
+icone viste (46, 6 fissate, con `IconSnapshot`) ma non quali ci sono adesso né come cliccarle.
+Il clic su un'icona del tray è il messaggio di callback dato a `Shell_NotifyIcon`, che conosce
+solo la taskbar: le icone vere nella barra non si fanno (l'unica strada sarebbe mettersi in
+mezzo ai messaggi del tray di tutte le app; scartata, non riproporla). Scelta dell'utente fra
+le alternative: **la freccia che apre la tendina di Windows** (le icone sono quelle di Windows,
+che funzionano come sempre); scartate le icone da guardare prese dalle istantanee del registro
+(vecchie, senza i menu, non dicono quali ci sono).
+
+Fatto (14/11/2026), `widgets/tray.rs`, fuori dal layout predefinito: pill con la freccia `E70E`
+nel colore del testo, uguale piena e compatta, nessun popup (`clickable`: anche dentro il ⋯). Il
+clic: `AllowSetForegroundWindow` al processo della taskbar (la barra ha appena avuto il clic),
+poi un thread di lavoro (`tray`, 256 KB, uno alla volta) nell'apartment MTA: UI Automation
+(`CUIAutomation8`, timeout di connessione e di transazione a 2 s), `ElementFromHandle` di
+`Shell_TrayWnd`, `FindFirst` dei discendenti con automation id `SystemTrayIcon` e classe
+`SystemTray.NormalButton` (il nome è tradotto: «Mostra icone nascoste»; con lo stesso id ci
+sono anche rete, volume, orologio e «Mostra desktop», con classi diverse; le icone fissate sono
+`NotifyItemIcon`), `Invoke`. Senza il pulsante (tutte le icone sulla taskbar, o il menu delle
+icone nascoste spento in Impostazioni) il log lo dice. Coi dati finti il clic non fa nulla.
+Nessuna opzione. `VARIANT` vuole la feature `Win32_System_Ole` del crate `windows`. Test
+ignorato `finds_the_chevron` (trova il pulsante senza premerlo). Pagina delle impostazioni:
+«Icone nascoste», uno solo per barra.
+
 ## Domande aperte (da decidere con l'utente)
 
 - Nessuna per ora.
@@ -1607,3 +1638,23 @@ Dati finti: `windows` in `workspaces.json` (glifi di Segoe Fluent Icons e colori
   le reinstallazioni di prima (105–133 ms; 128 quella subito prima, senza queste modifiche);
   a riposo per 30 s col layout dell'utente e WoW aperto: 6,9 MB privati, 10,8 MB committed,
   31 ms di CPU, 3,2 risvegli/s, 7 thread, 0 figli.
+- 14/11/2026, **`tray`** (sezione «Icone nascoste del tray»): sonde di sola lettura su finestre
+  di Explorer, `ITrayNotify`, `NotifyIconSettings` e ordine delle finestre (in 4 minuti la
+  taskbar non è mai passata davanti a niente); le icone vere nella barra non si fanno, scelta
+  dell'utente la freccia che apre la tendina di Windows. Trovare il pulsante: 39 ms la prima
+  volta (UI Automation si carica), 15 ms dopo (test ignorato). Barra di prova (`reserve = false`,
+  `tray` e l'orologio): prima di un clic 3,5 MB privati, 7,1 MB committed, 0 ms di CPU, 0,12
+  risvegli/s, 2 thread; quattro clic veri dell'utente sulla ^ in alto: tendina aperta e chiusa a
+  ogni clic, pulsante premuto in 17–43 ms; un minuto dopo (i worker del pool usciti) 3,1 MB
+  privati, 8,0 MB committed (+0,9 MB: `uiautomationcore.dll`, che resta caricata), 0 ms di CPU,
+  0,43 risvegli/s, 3 thread (uno di UI Automation, fermo), +47 handle. Binario 3,50 MB. Test 111
+  più 4 ignorati, clippy senza avvisi. `bar-right.png` rifatto dalla barra finta (con `tray`).
+  Successo durante le prove: lanciando la barra finta da Git Bash le variabili hanno perso la
+  barra rovesciata (`examplesmock`), quindi è partita con la config predefinita, che riserva lo
+  spazio, sopra la barra vera per ~2 minuti (18:25:43–18:27:41): le finestre ingrandite possono
+  essersi spostate di 40 px e tornate; poi area di lavoro controllata (di nuovo da y = 40). Per
+  la barra finta usare PowerShell coi percorsi assoluti. Non provati: la tendina senza il
+  pulsante (tutte le icone sulla taskbar o il menu spento), la taskbar a scomparsa, il widget
+  dentro il ⋯. Installata con il permesso dell'utente (`rustybar install`, primo frame 146 ms) e
+  `tray` aggiunto alla sua config vera, a destra prima di `network`: ricaricata rifacendo il
+  solo `tray`. Niente committato.
