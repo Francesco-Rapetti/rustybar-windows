@@ -1,10 +1,13 @@
-//! Keeps the two sides of a bar apart, as the macOS RustyBar does. When the widgets on the left
-//! and those on the right don't fit in the room the screen gives them, beside the center group (or
-//! each other), first the center group turns compact; then the widgets farthest from their edge
-//! give way first: they switch to their compact form one at a time, and when every one is compact
-//! they move, one at a time, the outermost last, to the popup of a `⋯` pill that takes their place,
-//! so that every widget stays at hand. A side takes its bigger forms back only with some room to
-//! spare, so that a widget whose width changes doesn't flip back and forth at the limit.
+//! Keeps the two sides of a bar apart, as the macOS RustyBar does. The center group sits in the
+//! middle of the screen while each side fits in its half; when one side needs more, the center
+//! group moves aside, toward the other side, just as far as it must (`center_x`), so that the two
+//! sides share all the room the screen has beside it. When the widgets on the left and those on
+//! the right don't fit in that room, first the center group turns compact; then the widgets
+//! farthest from their edge give way first: they switch to their compact form one at a time, and
+//! when every one is compact they move, one at a time, the outermost last, to the popup of a `⋯`
+//! pill that takes their place, so that every widget stays at hand. A side takes its bigger forms
+//! back only with some room to spare, so that a widget whose width changes doesn't flip back and
+//! forth at the limit.
 //!
 //! All of it is arithmetic on widths already measured: a bar that fits measures nothing more, and
 //! the compact pills are measured only while some bar needs them.
@@ -109,6 +112,17 @@ pub fn fits(room: Room, (l, r): (f32, f32), slack: f32) -> bool {
         Room::Shared(w) => l + r <= w - slack,
         Room::Split { left, right } => l <= left - slack && r <= right - slack,
     }
+}
+
+/// Where the center group, `center` wide, starts in a bar `width` DIPs wide whose sides are `left`
+/// and `right` wide (0 for a side without pills): in the middle of the screen, or as close to it
+/// as the sides leave it, `gap` away from them, when one of them takes more than its half. Sides
+/// that leave it no room at all (only when no form fits them) leave it in the middle.
+pub fn center_x(width: f32, margin: f32, gap: f32, (left, right): (f32, f32), center: f32) -> f32 {
+    let middle = (width - center) / 2.0;
+    let first = margin + if left > 0.0 { left + gap } else { 0.0 };
+    let last = width - margin - center - if right > 0.0 { right + gap } else { 0.0 };
+    if first <= last { middle.clamp(first, last) } else { middle }
 }
 
 /// Picks the form of every item. `prev` is what the last call returned for this bar (empty the
@@ -221,6 +235,50 @@ mod tests {
         let (levels, forms) = fit(&items, Room::Split { left: 200.0, right: 400.0 }, &[], measure);
         assert_eq!(levels.len(), 2);
         assert_eq!(forms, vec![Full, Compact, Full, Full]);
+    }
+
+    #[test]
+    fn a_long_side_takes_the_room_the_other_leaves() {
+        // The bar of a 1920 screen that told the center group's halves apart: power, workspaces,
+        // front_app | home, three claude, devices, tray, network, audio, system, clock (with the
+        // gaps of 8 in their widths), the center group compact (156)
+        let widgets = [
+            (true, 42.0, 42.0),
+            (true, 208.0, 208.0),
+            (true, 113.0, 113.0),
+            (false, 42.0, 42.0),
+            (false, 94.0, 64.0),
+            (false, 147.0, 71.0),
+            (false, 92.0, 64.0),
+            (false, 297.0, 116.0),
+            (false, 42.0, 42.0),
+            (false, 98.0, 42.0),
+            (false, 404.0, 76.0),
+            (false, 254.0, 88.0),
+            (false, 116.0, 116.0),
+        ];
+        let (items, measure) = bar(&widgets);
+        // Each side in its half (866): the right one gave up seven forms, the last for 21 DIPs
+        let (_, forms) = fit(&items, Room::Split { left: 866.0, right: 866.0 }, &[], measure.clone());
+        assert_eq!(forms.iter().filter(|f| **f == Compact).count(), 7);
+        // The two sharing the room beside it: only the three claude and devices give way
+        let (_, forms) = fit(&items, Room::Shared(1920.0 - 16.0 - 156.0 - 16.0), &[], measure);
+        let compact: Vec<usize> = (0..forms.len()).filter(|&i| forms[i] == Compact).collect();
+        assert_eq!(compact, vec![4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn the_center_group_moves_aside_only_as_far_as_it_must() {
+        // Both sides in their halves: in the middle
+        assert_eq!(center_x(1920.0, 8.0, 8.0, (363.0, 700.0), 156.0), 882.0);
+        // The right side past its half: as close to the middle as it lets it, 8 from it
+        assert_eq!(center_x(1920.0, 8.0, 8.0, (363.0, 1271.0), 156.0), 1920.0 - 8.0 - 1271.0 - 8.0 - 156.0);
+        // The left side past its half
+        assert_eq!(center_x(1920.0, 8.0, 8.0, (1271.0, 363.0), 156.0), 8.0 + 1271.0 + 8.0);
+        // A side without pills needs no gap: the center group at the margin
+        assert_eq!(center_x(1920.0, 8.0, 8.0, (0.0, 1740.0), 156.0), 8.0);
+        // No room at all: the middle, as before
+        assert_eq!(center_x(1920.0, 8.0, 8.0, (1000.0, 1000.0), 156.0), 882.0);
     }
 
     #[test]

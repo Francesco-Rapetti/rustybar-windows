@@ -32,7 +32,7 @@ use crate::app::{Event, push};
 use crate::gfx::{self, Gfx};
 use crate::log;
 use crate::theme::Theme;
-use crate::fit::Fitted;
+use crate::fit::{self, Fitted};
 use crate::ui::Measured;
 
 /// The message the shell sends AppBar notifications with.
@@ -321,7 +321,8 @@ impl Bar {
             places.push((p, x));
             x += p.width + gap;
         }
-        let mut x = (width - total(&sides.center)) / 2.0;
+        // In the middle, or moved aside by a side that takes more than its half
+        let mut x = fit::center_x(width, margin, gap, (total(&sides.left), total(&sides.right)), total(&sides.center));
         for p in &sides.center {
             places.push((p, x));
             x += p.width + gap;

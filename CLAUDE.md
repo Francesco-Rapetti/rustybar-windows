@@ -258,9 +258,17 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   centro compatto, widget compatti e nascosti per lato). Se tutto entra in forma piena (il caso
   normale qui) costa una somma e non si misura altro; altrimenti si misurano le pill compatte
   (`Widget::compact`, tenute solo se più strette, in cache come `nome\0compact`) e le pill ⋯.
+  Il gruppo centrale sta in mezzo allo schermo finché ogni lato entra nella sua metà; se un lato
+  ne vuole di più si sposta verso l'altro quanto basta, a `item_gap` dal lato lungo
+  (`fit::center_x`, usata da `Bar::render`): i due lati si dividono tutto lo spazio accanto al
+  centro (`room` dà sempre `Room::Shared`, una sola corsia per i due lati). Deciso con l'utente il
+  17/11/2026: sullo schermo da 1920 la destra si compattava tutta con ~500 DIP liberi a sinistra
+  (qui la versione macOS è diversa: là il centro resta in mezzo). La forma larga di `media`
+  (`widen`) solo se il centro resta in mezzo (`centered`, `Room::Split`).
   Ordine: prima il gruppo centrale compatto se i lati non entrano accanto a quello pieno; poi i
-  widget più lontani dal loro bordo passano uno alla volta alla forma compatta (a pari distanza
-  prima il lato destro), poi, tutti compatti, vanno uno alla volta nel popup del ⋯ del loro lato
+  widget più lontani dal loro bordo, dei due lati insieme, passano uno alla volta alla forma
+  compatta (a pari distanza prima il lato destro), poi, tutti compatti, vanno uno alla volta nel
+  popup del ⋯ del loro lato
   (`⋯left`, `⋯right`, icona `E712`, all'estremità interna del lato). Le forme più grandi tornano
   solo con 24 DIP di margine (`SLACK`). Il popup ⋯ lo disegna l'app (`more_scene`,
   `pill_shapes`): le pill nascoste nella forma piena una sotto l'altra, allineate al lato; clic su
@@ -1658,3 +1666,15 @@ ignorato `finds_the_chevron` (trova il pulsante senza premerlo). Pagina delle im
   dentro il ⋯. Installata con il permesso dell'utente (`rustybar install`, primo frame 146 ms) e
   `tray` aggiunto alla sua config vera, a destra prima di `network`: ricaricata rifacendo il
   solo `tray`. Niente committato.
+- 17/11/2026, **il centro si sposta** (chiesto dall'utente: sullo schermo da 1920 tutta la destra
+  era compatta con spazio libero ai due lati; com'è fatto in «La barra che non ci sta»). Con
+  `msg query` sulla barra vera: ogni lato aveva 866 DIP, la sinistra ne usava 363, la destra ne
+  voleva 1586 e `system` era diventato compatto per 21 DIP, lasciandone 145 vuoti. Ora i lati si
+  dividono 1732 DIP: compatti solo i tre `claude` e `devices` (test
+  `a_long_side_takes_the_room_the_other_leaves` con quelle misure, e
+  `the_center_group_moves_aside_only_as_far_as_it_must`). Barra finta sullo schermo da 1920
+  (quello grande nascosto da un gioco a schermo intero): `media` a x = 694 invece di 898, a 8 DIP
+  dal gruppo di destra; con un lato destro corto torna in mezzo in forma piena, e di nuovo spostato
+  quando il lato torna lungo. Costo: solo il calcolo quando cambiano le pill. Test 113, più 4
+  ignorati, clippy senza avvisi. Resta lo spazio di un passo: un widget torna pieno solo se la sua
+  forma piena ci sta tutta (`SLACK` compreso). Niente committato né installato.

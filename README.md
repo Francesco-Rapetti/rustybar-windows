@@ -139,6 +139,10 @@ Environment variables:
 
 ### When the bar doesn't fit
 
+The center group sits in the middle of the screen while each side fits in its half. When one
+side needs more, the center group moves toward the other side, just as far as it must, so a
+long side can use the room a short one leaves.
+
 On a narrow screen the pills give way instead of running into each other: first the center
 group turns compact; then the widgets farthest from their edge switch, one at a time, to their
 compact form (the clock without the date, `system` with the memory alone, `network` and `audio`
@@ -151,7 +155,8 @@ screen, it costs a sum and nothing more is measured. `rustybar msg query` says w
 and what's in `⋯`, and `rustybar msg popup ⋯left` (or `⋯right`) opens that popup.
 
 With room to spare, the center group may take more of it instead: `media`'s title and artist
-are cut later, and go back to their own form as soon as the room is gone. `[bar]
+are cut later, and go back to their own form as soon as the room is gone (the wide form never
+moves the center group out of the middle). `[bar]
 always_compact = ["system"]` keeps widgets in their compact form on every screen, and `[bar]
 screens = "primary"` puts a bar on the main screen alone (by default every screen has one).
 

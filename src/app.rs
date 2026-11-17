@@ -1358,20 +1358,27 @@ fn total(widths: impl Iterator<Item = f32>, gap: f32) -> f32 {
     sum + gap * n.saturating_sub(1) as f32
 }
 
-/// The room the sides have in a bar `width` DIPs wide: each its own beside the center group,
-/// `center` wide, or together without one.
+/// The room the sides have in a bar `width` DIPs wide, together: beside the center group, `center`
+/// wide, which moves aside when one side takes more than its half (see `fit::center_x`), or beside
+/// each other without one.
 fn room(width: f32, sides: &Sides, center: f32, margin: f32, gap: f32) -> Room {
     if sides.center.is_empty() {
         Room::Shared(width - 2.0 * margin - gap)
     } else {
-        let side = (width - center) / 2.0 - margin - gap;
-        Room::Split { left: side, right: side }
+        Room::Shared(width - 2.0 * margin - center - 2.0 * gap)
     }
 }
 
+/// The room each side has with the center group, `center` wide, in the middle of the bar.
+fn centered(width: f32, center: f32, margin: f32, gap: f32) -> Room {
+    let side = (width - center) / 2.0 - margin - gap;
+    Room::Split { left: side, right: side }
+}
+
 /// The center group in its wide form (see `Widget::wide`), when every pill keeps its full form
-/// beside it: with `SLACK` to spare the first time, so that it doesn't flip at the limit. `state`
-/// says whether it was wide (and says it for the next time).
+/// beside it and it stays in the middle of the bar (the wide form never pushes it aside): with
+/// `SLACK` to spare the first time, so that it doesn't flip at the limit. `state` says whether it
+/// was wide (and says it for the next time).
 fn widen(width: f32, state: &mut Fitted, mut sides: Sides, wide: &HashMap<String, Measured>, margin: f32, gap: f32) -> Sides {
     let was_wide = std::mem::take(&mut state.center_wide);
     if !state.full() || !sides.center.iter().any(|m| wide.contains_key(&m.key)) {
@@ -1379,7 +1386,7 @@ fn widen(width: f32, state: &mut Fitted, mut sides: Sides, wide: &HashMap<String
     }
     let center = total(sides.center.iter().map(|m| wide.get(&m.key).unwrap_or(m).width), gap);
     let lr = (total(sides.left.iter().map(|m| m.width), gap), total(sides.right.iter().map(|m| m.width), gap));
-    if fit::fits(room(width, &sides, center, margin, gap), lr, if was_wide { 0.0 } else { fit::SLACK }) {
+    if fit::fits(centered(width, center, margin, gap), lr, if was_wide { 0.0 } else { fit::SLACK }) {
         for m in &mut sides.center {
             if let Some(w) = wide.get(&m.key) {
                 *m = w.clone();
