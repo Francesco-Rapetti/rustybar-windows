@@ -14,6 +14,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::core::{BOOL, HSTRING, Result};
 
+pub use crate::svg::Outline;
 use crate::theme::{Rgba, Theme};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +44,9 @@ pub struct Item {
     pub tile: Option<Rgba>,
     /// Drawn in place of text: a level as a small bar, a thin line between groups.
     pub drawn: Option<Drawn>,
+    /// A shape of SVG paths in the item's color, a square as wide as the item (Home Assistant's
+    /// logo).
+    pub outline: Option<Arc<Outline>>,
 }
 
 /// What an item can be drawn as, in its color.
@@ -60,7 +64,12 @@ pub const GAUGE_WIDTH: f32 = 20.0;
 
 impl Item {
     pub fn text(text: impl Into<String>, color: Rgba) -> Item {
-        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false, image: None, image_radius: 4.0, tile: None, drawn: None }
+        Item { text: text.into(), color, small: false, max_width: None, min_width: 0.0, fixed: None, space: None, icon: false, logo: false, image: None, image_radius: 4.0, tile: None, drawn: None, outline: None }
+    }
+
+    /// A shape of SVG paths `size` DIPs on a side, in `color`, in place of text.
+    pub fn outline(outline: Arc<Outline>, size: f32, color: Rgba) -> Item {
+        Item { outline: Some(outline), min_width: size, ..Item::text("", color) }
     }
 
     /// A level as a small bar, `fill` over a `track`.
@@ -336,6 +345,7 @@ impl Text {
             (item.text.as_str(), item.color.bits(), item.small, item.icon, item.logo, width.to_bits(), text_x.to_bits()).hash(&mut h);
             item.image.as_ref().map(|i| (i.id, item.image_radius.to_bits())).hash(&mut h);
             item.tile.map(|c| c.bits()).hash(&mut h);
+            item.outline.as_ref().map(|o| o.id).hash(&mut h);
             item.drawn.map(|d| match d {
                 Drawn::Gauge(level, fill) => (1u8, level, fill.bits()),
                 Drawn::Rule => (2u8, 0, 0),
@@ -524,6 +534,8 @@ pub enum Shape {
     Image { rect: Rect, radius: f32, image: Arc<Image> },
     /// Text that wraps at the rectangle's width, from its top: a description, a paragraph.
     Para { rect: Rect, text: String, font: Font, color: Rgba },
+    /// A shape of SVG paths filled in a color, as large as fits in the rectangle (an icon).
+    Outline { rect: Rect, outline: Arc<Outline>, color: Rgba },
 }
 
 /// A part of the popup that can be clicked: under the mouse it gets the hover tint, in its shape.
@@ -591,6 +603,11 @@ impl Scene {
         self.shapes.push(Shape::Para { rect, text: text.into(), font, color });
     }
 
+    /// An icon of SVG paths, as large as fits in `rect`, in `color`.
+    pub fn outline(&mut self, rect: Rect, outline: Arc<Outline>, color: Rgba) {
+        self.shapes.push(Shape::Outline { rect, outline, color });
+    }
+
     pub fn zone(&mut self, rect: Rect, radius: f32, action: impl Into<String>) {
         self.zones.push(Zone { rect, radius, action: action.into(), slider: false });
     }
@@ -611,6 +628,7 @@ impl Scene {
                 Shape::Text { rect, text, font, color, align } => Shape::Text { rect: moved(rect), text, font, color, align },
                 Shape::Image { rect, radius, image } => Shape::Image { rect: moved(rect), radius, image },
                 Shape::Para { rect, text, font, color } => Shape::Para { rect: moved(rect), text, font, color },
+                Shape::Outline { rect, outline, color } => Shape::Outline { rect: moved(rect), outline, color },
             });
         }
         for zone in other.zones {
@@ -655,6 +673,11 @@ impl Scene {
                     3u8.hash(&mut h);
                     rect.hash_into(&mut h);
                     (text, font.size.to_bits(), font.weight, font.icons, color.bits()).hash(&mut h);
+                }
+                Shape::Outline { rect, outline, color } => {
+                    5u8.hash(&mut h);
+                    rect.hash_into(&mut h);
+                    (outline.id, color.bits()).hash(&mut h);
                 }
             }
         }

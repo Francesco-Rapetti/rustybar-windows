@@ -501,6 +501,12 @@ pub fn paint_shapes(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f
                     let at = Vector2 { X: (rect.x * s).round() / s, Y: (rect.y * s).round() / s };
                     ctx.DrawTextLayout(at, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 }
+                Shape::Outline { rect, outline, color } => {
+                    brush.SetColor(&gfx::color(*color));
+                    if let Err(e) = crate::svg::fill(ctx, brush, outline, *rect) {
+                        log!("popup outline: {e}");
+                    }
+                }
             }
         }
     }

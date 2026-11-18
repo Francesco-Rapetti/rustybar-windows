@@ -332,13 +332,19 @@ Each popup, on made-up data (see [Made-up data](#made-up-data)):
   `temp_warning`, `temp_critical`, `gpu = false`. The fan and the memory's clock come with the
   temperature, in the same call; the GPU's clock costs ~0.3 ms in the driver, so only while the
   popup is open.
-- **home** (not in the default layout: it needs a server): Home Assistant. A house in its blue
-  with how many devices of the popup are on, gray while the server can't be reached; while a 3D
-  printer prints, its progress in front. The popup is a dashboard of the `groups` of the config:
-  lights (a click toggles, a slider dims), switches, fans, covers (a slider sets the position), a
-  climate (its mode, the room's temperature, the modes, − target +), a vacuum, the printer's plug
-  with the progress (off only at a second click), scripts and scenes as chips; *Open Home
-  Assistant* last. It keeps one WebSocket open while a bar shows, subscribed to the entities of
+- **home** (not in the default layout: it needs a server): Home Assistant, as the macOS RustyBar
+  has it. Home Assistant's logo in its blue with how many devices of the popup are on, gray while
+  the server can't be reached; while a 3D printer prints, its progress in a part of its own. The
+  logo is the one your server has for browsers (`/static/icons/mask-icon.svg`), fetched once and
+  kept in `%LOCALAPPDATA%\rustybar`; until then, a house. The popup is a dashboard of the `groups`
+  of the config: lights (a click toggles, a bar with the brightness dims), switches, fans, covers
+  (a bar sets the position), a climate (the icon of its mode, the room's temperature, the modes as
+  icons, − target +), a vacuum, the printer's plug with the progress (off only at a second click),
+  scripts and scenes as chips; *Open Home Assistant* last. The icons are the ones Home Assistant
+  shows ([Material Design Icons](https://pictogrammers.com/library/mdi/), Apache-2.0, drawn as
+  vectors): a tile's `icon` can name one (`fan`, `mdi:fan`), a symbol of macOS as the macOS
+  RustyBar's config has it (`lightbulb`, `powerplug.fill`), or a glyph of Segoe Fluent Icons
+  (`"E7F4"`), so the same `[widgets.home]` works on both. It keeps one WebSocket open while a bar shows, subscribed to the entities of
   its tiles only: Home Assistant says what changed, the bar does nothing in between, and WinHTTP
   keeps the connection alive on its own threads. Closed while no bar shows (a game full screen).
   The token, a long-lived access token from your Home Assistant profile, goes in Windows'

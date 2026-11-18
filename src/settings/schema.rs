@@ -556,7 +556,7 @@ fn home(f: &mut Form, table: &Spot) {
             let (id1, icon1, id2, name2) = (id.clone(), icon.clone(), id.clone(), name.clone());
             let mut controls = vec![
                 Control::Text { value: name.clone(), placeholder: t("nome suo", "its own name").into(), width: 130.0, run: Rc::new(move |v: String| put_tile(&s1, &id1, v.trim(), &icon1)) },
-                Control::Text { value: icon.clone(), placeholder: t("icona", "icon").into(), width: 64.0, run: Rc::new(move |v: String| put_tile(&s2, &id2, &name2, v.trim())) },
+                Control::Text { value: icon.clone(), placeholder: t("icona", "icon").into(), width: 96.0, run: Rc::new(move |v: String| put_tile(&s2, &id2, &name2, v.trim())) },
             ];
             controls.extend(moves(&entities, j, tiles.len()));
             controls.push(Control::Icon { glyph: "\u{E74D}", run: Rc::new(move || store::remove(&s3)) });

@@ -25,6 +25,7 @@ mod process;
 mod secret;
 mod settings;
 mod stats;
+mod svg;
 mod theme;
 mod ui;
 mod wake;

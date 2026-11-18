@@ -238,7 +238,10 @@ Da misurare dopo ogni cambiamento che può pesare, con `scripts\measure.ps1`:
   nel colore del bordo prima delle parti dopo la prima: `ui::parts` dà dove, disegnata col testo
   in `bar::paint_text` (`PushAxisAlignedClip` sul rettangolo arrotondato) e nel popup ⋯ con
   `Shape::Cut`, nella firma del testo; `Scene` e `Fonts` dei
-  popup, `Backdrop` per i colori propri di un popup), `palette.rs` (i colori di un'immagine in
+  popup, `Backdrop` per i colori propri di un popup; `Shape::Outline` e `Item::outline`: una
+  forma di tracciati SVG in un colore), `svg.rs` (i dati `d` di un tracciato SVG letti una volta
+  in segmenti assoluti, archi coi raggi corretti come vuole SVG, e riempiti con una geometria di
+  Direct2D a ogni misura: le icone e il logo di `home`), `palette.rs` (i colori di un'immagine in
   Oklab, per il popup di `media`), `theme.rs` (le 24 palette copiate dalla versione macOS + `windows` dal registro:
   `AppsUseLightTheme`, `Accent\AccentPalette`; `level` per giallo e rosso, `tile` per i riquadri
   dei popup), `config.rs` (serde + toml, `deny_unknown_fields`, `rustybar check`,
@@ -674,21 +677,27 @@ la named pipe ogni 30 s, fermo senza barre visibili e con un gioco della lista.
   percorso. `RUSTYBAR_LOCALE` (`en-US`): lingua dei testi e formati di date e numeri
   (`i18n::locale()` al posto del null nelle funzioni `*Ex`), per gli screenshot in inglese.
   Costo a riposo: nessuno (una variabile d'ambiente letta all'avvio).
-- `home` (fatto, sopra le decisioni): pill con la casa (`E80F`) nel blu di Home Assistant
-  (`#18bcf2`) e quanti dispositivi delle tessere sono accesi (luci, prese, ventole,
-  input_boolean accesi; clima non spento; robot che pulisce), grigia senza conteggio se il
-  server non risponde; mentre la stampante stampa, davanti la stampante (`E749`) e la
-  percentuale (gialla in pausa); compatta senza stampante. Popup (324 DIP) come su macOS: gruppi
+- `home` (fatto, sopra le decisioni; reso come quello della versione macOS il 18/11/2026, sotto
+  «`home` come su macOS»): pill col logo di Home Assistant preso dal server nel blu di Home
+  Assistant (`#18bcf2`; la casa `E80F` finché non c'è) e quanti dispositivi delle tessere sono
+  accesi (luci, prese, ventole, input_boolean accesi; clima non spento; robot che pulisce),
+  grigia senza conteggio se il server non risponde; mentre la stampante stampa, a sinistra in
+  una parte sua (`Pill::part`, la linea in mezzo) la stampante e la percentuale (gialla in
+  pausa); compatta senza stampante. Popup (324 DIP) come su macOS: gruppi
   di `groups` col titolo, tessere di 150 DIP due per riga (alte come la più alta della coppia):
-  icona (lampadina `EA80`, presa/interruttore `E7E8`, tapparella `E70E`/`E70D`, robot `E99A`,
-  o `icon` della tessera come glifo o codice esadecimale: un nome di simbolo macOS è ignorato),
-  nome, stato nel colore dello stato; luce = clic accende/spegne, cursore se regolabile
-  (inviato al rilascio, 0 spegne); tapparella = clic e cursore della posizione; clima largo due
-  tessere (termometro `E9CA` nel colore della modalità, nome, modalità, temperatura della stanza;
-  acceso: le modalità come chip di testo su più righe e − obiettivo + inviato un secondo dopo
-  l'ultimo clic); robot pulisce/torna; presa della stampante larga con la percentuale, la barra
-  e «ancora 1 h 20 min», spenta solo al secondo clic con `printer.off`; script e scene come chip
-  (in esecuzione la clessidra `E916`, fallito `E783`); non disponibile grigio senza azioni;
+  icona (le Material Design Icons di Home Assistant: lampadina piena se accesa e vuota se spenta,
+  presa, ventola, tenda aperta/chiusa, robot; o `icon` della tessera: un'icona del file, un
+  simbolo macOS come nella config del Mac, o un glifo di Segoe o il suo codice esadecimale),
+  nome, stato nel colore dello stato, sfondo più chiaro con un velo del colore se acceso; luce =
+  clic accende/spegne, cursore a barra se regolabile (riempita fino al valore con la
+  percentuale sopra, come su macOS; inviato al rilascio, 0 spegne); tapparella = clic e cursore
+  della posizione; clima largo due tessere (l'icona della modalità nel suo colore: fiamma,
+  fiocco, goccia, ventola, termometro; nome, modalità, temperatura della stanza; acceso: le
+  modalità come icone in una riga, 30×24, e − obiettivo + in fondo, sotto se non ci stanno,
+  inviato un secondo dopo l'ultimo clic); robot pulisce/torna; presa della stampante larga con la
+  percentuale, la barra e «ancora 1 h 20 min», spenta solo al secondo clic con `printer.off`;
+  script e scene come chip (in esecuzione la clessidra, fallito il cerchio col punto
+  esclamativo); non disponibile grigio senza azioni;
   servizio fallito «Non riuscito» in rosso finché l'entità cambia; «Apri Home Assistant»
   (`dashboard`). Valori impostati dal popup mostrati per 15 s o finché Home Assistant li ha.
   Fonti: `subscribe_entities` con gli id delle tessere e dei sensori della stampante (eventi
@@ -1268,6 +1277,41 @@ Nessuna opzione. `VARIANT` vuole la feature `Win32_System_Ole` del crate `window
 ignorato `finds_the_chevron` (trova il pulsante senza premerlo). Pagina delle impostazioni:
 «Icone nascoste», uno solo per barra.
 
+## `home` come su macOS (chiesto dall'utente il 18/11/2026)
+
+L'utente, dopo aver salvato il token: «rendimelo come il plugin ha di rustybar per mac, con le
+stesse funzioni». Le funzioni c'erano già tutte; diversi l'aspetto e due dettagli, presi dal
+widget della versione macOS (`src/widgets/home.rs`, `ui/render.rs` per il cursore) e dal suo
+screenshot:
+
+- **Logo**: quello del server (`/static/icons/mask-icon.svg`, un tracciato SVG in un `viewBox`
+  di 240), scaricato una volta dopo `auth_ok` su un thread di lavoro (`fetch_logo`, senza token:
+  è un file statico) e tenuto in `%LOCALAPPDATA%\rustybar\home-assistant-logo.svg`, letto
+  all'avvio dalle volte dopo; nel blu di Home Assistant, grigio senza server; la casa `E80F`
+  finché non c'è (e coi dati finti). Il marchio non entra nella repo, come su macOS.
+- **Icone**: Segoe Fluent Icons non ha presa, ventola, fiamma, termometro, tenda né clessidra
+  (controllato sulla tabella di Microsoft); al posto dei simboli di macOS le Material Design
+  Icons, quelle che mostra Home Assistant (`widgets/home_icons.txt`, 35 icone, 10 KB, da
+  `@mdi/svg` 7.4.47, Apache-2.0; nome|tracciato in 24×24), disegnate come vettori (`svg.rs`).
+  `icon` di una tessera: un'icona del file (`fan`, `mdi:fan`), un simbolo macOS (`named`: la
+  config del Mac funziona uguale, `lightbulb` su un interruttore dà la lampadina) o un glifo di
+  Segoe. La lampadina è piena se accesa e vuota se spenta, come su macOS.
+- **Tessere accese**: sfondo più chiaro col 25% del colore dello stato (`tile_color`), non la
+  tinta gialla di prima.
+- **Cursore**: una barra arrotondata (18 DIP) riempita fino al valore col `primary`, la
+  percentuale sopra in `on_primary`, o subito dopo se il pieno è corto (`level_slider`, la regola
+  di `layout_slider` del Mac); la traccia in `crust`. Il cursore di Windows 11 resta per `audio`.
+- **Clima**: l'icona della modalità (fiamma pesca, fiocco cielo, goccia e ventola verde acqua,
+  termometro, A), le modalità come icone 30×24 in una riga con − obiettivo + in fondo (sotto se
+  non ci stanno).
+- **Stampante nella pill**: una parte sua con la linea in mezzo (`Pill::part` a livello 0), al
+  posto delle due pill del Mac (qui un widget è una pill).
+- **Config**: i gruppi del Mac (`rustybar.local.toml.example` dei dotfiles dell'utente, con gli
+  id in parte segnaposto) rifatti nella config vera con le entità del server, lette con `GET
+  /api/states` da uno script che prendeva il token dal Gestore credenziali senza stamparlo:
+  luci, tende, clima, la stampante 3D coi suoi sensori e lo script che la spegne, robot, scene e
+  script. Server e id stanno solo nella config dell'utente, non qui.
+
 ## Domande aperte (da decidere con l'utente)
 
 - Nessuna per ora.
@@ -1678,3 +1722,16 @@ ignorato `finds_the_chevron` (trova il pulsante senza premerlo). Pagina delle im
   quando il lato torna lungo. Costo: solo il calcolo quando cambiano le pill. Test 113, più 4
   ignorati, clippy senza avvisi. Resta lo spazio di un passo: un widget torna pieno solo se la sua
   forma piena ci sta tutta (`SLACK` compreso). Niente committato né installato.
+- 18/11/2026, **`home` come su macOS** (sezione omonima sopra): il token salvato dall'utente non
+  era letto (il widget l'aveva cercato prima, e lo rilegge solo all'apertura del popup o quando si
+  rifà); con la config dei gruppi il widget si è rifatto e collegato. Tessere della config vera
+  provate coi dati veri (`msg shot home` della barra vera, fuori schermo). Logo, icone, cursore a
+  barra, clima e stampante provati coi dati finti (`home.png` e `bar-right.png` rifatti) e su una
+  barra di prova (`reserve = false`, `home` e l'orologio) col server vero: logo scaricato e
+  salvato, pill «logo 2», popup con le tessere vere. A riposo per 30 s: 6,1 MB privati, 9,3 MB
+  committed, 0 ms di CPU, 0,37 risvegli/s, 9 thread (WinHTTP), 0 figli; primo frame 49 ms.
+  Binario 3,54 MB (+40 KB: `svg.rs` e le icone). Test 122, più 4 ignorati (nuovi: il lettore dei
+  tracciati, il logo da un documento, i nomi delle icone e dei simboli macOS, le etichette del
+  cursore, la stampante nella sua parte), clippy senza avvisi. Non provati: un clic vero nelle
+  tessere (cambierebbe la casa), una stampa in corso dal vivo, il tema chiaro, una scala diversa
+  dal 100% del logo. Niente committato né installato.

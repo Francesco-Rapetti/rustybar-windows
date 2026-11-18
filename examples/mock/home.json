@@ -1,7 +1,7 @@
 {
   "online": true,
   "groups": [
-    {"title": "Lights", "entities": ["light.living_room", {"id": "switch.bedroom_lamp", "icon": "EA80"}, "switch.coffee_machine", "cover.living_room_blind"]},
+    {"title": "Lights", "entities": ["light.living_room", {"id": "switch.bedroom_lamp", "icon": "lightbulb"}, "switch.coffee_machine", "cover.living_room_blind"]},
     {"title": "Climate", "entities": ["climate.living_room"]},
     {"title": "Other", "entities": ["switch.printer", "vacuum.robot", "script.good_night", "scene.movie_night", "scene.all_off"]}
   ],

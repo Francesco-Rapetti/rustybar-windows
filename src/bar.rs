@@ -581,6 +581,13 @@ fn paint_text(ctx: &ID2D1DeviceContext, brush: &ID2D1SolidColorBrush, s: f32, th
                 }
                 continue;
             }
+            if let Some(outline) = &item.outline {
+                let size = placed.width;
+                if let Err(e) = crate::svg::fill(ctx, brush, outline, crate::ui::Rect::new(placed.x, (height - size) / 2.0, size, size)) {
+                    crate::log!("pill outline: {e}");
+                }
+                continue;
+            }
             if let Some(drawn) = item.drawn {
                 let (track, radius, fill) = crate::ui::drawn(drawn, placed.x, 0.0, placed.width, height, theme.font_size, s);
                 ctx.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: gfx::rect(track.x, track.y, track.w, track.h), radiusX: radius, radiusY: radius }, brush);

@@ -1505,6 +1505,10 @@ fn pill_shapes(scene: &mut Scene, t: &Theme, m: &Measured, x: f32, y: f32) {
             scene.image(Rect::new(x + p.x, y + (t.pill_height - p.width) / 2.0, p.width, p.width), item.image_radius, image.clone());
             continue;
         }
+        if let Some(outline) = &item.outline {
+            scene.outline(Rect::new(x + p.x, y + (t.pill_height - p.width) / 2.0, p.width, p.width), outline.clone(), item.color);
+            continue;
+        }
         if let Some(drawn) = item.drawn {
             let (track, radius, fill) = crate::ui::drawn(drawn, x + p.x, y, p.width, t.pill_height, t.font_size, 1.0);
             scene.fill(track, radius, item.color);

@@ -1,21 +1,30 @@
 //! Home Assistant: the devices of the house, live, and a dashboard of tiles to control them, as the
 //! macOS RustyBar's.
 //!
-//! - Pill: a house (Segoe Fluent Icons: Home Assistant's logo is a trademark) in Home Assistant's
-//!   blue with how many devices of the popup are on (lights, switches, fans, the climate in any
-//!   mode but off, the vacuum while it cleans), gray and without the count while Home Assistant
-//!   can't be reached. While the 3D printer prints, a printer and the progress in front, yellow
-//!   while paused.
+//! - Pill: Home Assistant's logo in its blue with how many devices of the popup are on (lights,
+//!   switches, fans, the climate in any mode but off, the vacuum while it cleans), gray and
+//!   without the count while Home Assistant can't be reached. The logo is the server's own mask
+//!   icon (`/static/icons/mask-icon.svg`), fetched once after the first connection and kept in
+//!   `%LOCALAPPDATA%\rustybar`: a trademark, so it isn't in the repo, and until then there's a
+//!   house of Segoe Fluent Icons. While the 3D printer prints, a printer and the progress in a
+//!   part of their own on the left (yellow while paused), a line between, as two pills on macOS.
 //! - Popup: the groups of `groups`, each a title and its tiles, two in a row; a tile is the icon,
-//!   the name (Home Assistant's, or the tile's own) and the state, in the color of the state. A
-//!   light toggles at a click and has a slider when dimmable (set when released; 0 turns it off);
-//!   a switch, fan or input_boolean toggles; a cover toggles and has a slider with its position; a
-//!   climate is two tiles wide, with its mode, the room's temperature, the modes as chips and −
-//!   target + (sent a second after the last click); a vacuum cleans or goes back; the printer's
-//!   plug (`printer.plug`) is two tiles wide with the progress, and turns off only at a second
-//!   click, through `printer.off`; scripts and scenes are chips after the tiles of their group.
-//!   Unavailable: gray, no actions. A service that fails: `Non riuscito` in red until the entity
-//!   changes. Last, «Apri Home Assistant», which opens `dashboard`.
+//!   the name (Home Assistant's, or the tile's own) and the state, in the color of the state, on
+//!   a lighter background while on. The icons are the ones Home Assistant shows (Material Design
+//!   Icons, `home_icons.txt`, drawn by `svg.rs`), where macOS has its symbols; a tile's `icon` is
+//!   one of them (`fan`, `mdi:fan`), a symbol of macOS as the macOS RustyBar's config names it
+//!   (`lightbulb`, `powerplug.fill`) or a glyph of Segoe Fluent Icons. A light toggles at a
+//!   click, a bulb lit only while on, and has a slider when dimmable (a bar filled to the
+//!   brightness with the percentage on it, as on macOS; set when released, 0 turns it off); a
+//!   switch, fan or input_boolean toggles; a cover toggles and has a slider with its position; a
+//!   climate is two tiles wide, with the icon of its mode (a flame peach for heat, a snowflake
+//!   sky for cool, a drop teal for dry, a fan teal, a thermometer otherwise), the room's
+//!   temperature, the modes as icons in a row and − target + (sent a second after the last
+//!   click); a vacuum cleans or goes back; the printer's plug (`printer.plug`) is two tiles wide
+//!   with the progress, and turns off only at a second click, through `printer.off`; scripts and
+//!   scenes are chips after the tiles of their group. Unavailable: gray, no actions. A service
+//!   that fails: `Non riuscito` in red until the entity changes. Last, «Apri Home Assistant»,
+//!   which opens `dashboard`.
 //! - Data: the WebSocket API (`net::Socket`), `subscribe_entities` for the tiles and the
 //!   printer's sensors only, open while a bar shows: Home Assistant says what changed, and the bar
 //!   does nothing in between (WinHTTP keeps the connection alive on its own threads). A dropped
@@ -39,23 +48,101 @@ use crate::json::Json;
 use crate::log;
 use crate::net::{self, Socket};
 use crate::theme::{Rgba, Theme};
-use crate::ui::{Align, Font, Fonts, Item, Pill, Rect, Scene, Weight};
+use crate::ui::{Align, Font, Fonts, Item, Outline, Pill, Rect, Scene, Weight};
 use crate::wake::{Timer, Wake};
 
-// Segoe Fluent Icons
+// Segoe Fluent Icons: the house until the server's logo is in, − and +. The rest are the icons
+// Home Assistant shows (`home_icons.txt`): Segoe has no plug, fan, flame, thermometer or blind
 const HOUSE: &str = "\u{E80F}";
-const BULB: &str = "\u{EA80}";
-const POWER: &str = "\u{E7E8}";
-const OPEN: &str = "\u{E70E}";
-const CLOSED: &str = "\u{E70D}";
-const THERMOMETER: &str = "\u{E9CA}";
-const ROBOT: &str = "\u{E99A}";
-const PRINTER: &str = "\u{E749}";
-const PLAY: &str = "\u{E768}";
-const RUNNING: &str = "\u{E916}";
-const FAILED: &str = "\u{E783}";
 const PLUS: &str = "\u{E710}";
 const MINUS: &str = "\u{E738}";
+
+/// Material Design Icons by name, as `home_icons.txt` has them.
+const ICONS: &str = include_str!("home_icons.txt");
+
+thread_local! {
+    static OUTLINES: RefCell<HashMap<String, Option<Arc<Outline>>>> = RefCell::new(HashMap::new());
+}
+
+/// An icon of `home_icons.txt`, read the first time it's drawn.
+fn icon(name: &str) -> Option<Arc<Outline>> {
+    OUTLINES.with(|o| {
+        o.borrow_mut()
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let d = ICONS.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix('|'))?;
+                Outline::new(d, [0.0, 0.0, 24.0, 24.0]).map(Arc::new)
+            })
+            .clone()
+    })
+}
+
+/// The icon a name means: one of `home_icons.txt` (`fan`, or `mdi:fan` as in Home Assistant), or
+/// a symbol of macOS (`lightbulb`, `powerplug.fill`), as the macOS RustyBar's config names them.
+fn named(name: &str) -> Option<&'static str> {
+    let name = name.trim();
+    let mdi = name.strip_prefix("mdi:").unwrap_or(name);
+    if let Some(line) = ICONS.lines().filter(|l| !l.starts_with('#')).find(|l| l.split('|').next() == Some(mdi)) {
+        return line.split('|').next();
+    }
+    Some(match name.trim_end_matches(".fill") {
+        "lightbulb" | "lightbulb.led" | "lightbulb.2" | "light.max" | "light.min" | "light.panel" | "light.strip.leftthird.rightthird" => "lightbulb",
+        "powerplug" | "poweroutlet.type.f" | "poweroutlet.type.c" | "poweroutlet.strip" => "power-plug",
+        "fan" | "fan.desk" | "fan.ceiling" | "fan.floor" | "wind" => "fan",
+        "power" | "togglepower" | "poweron" | "switch.2" => "power",
+        "roller.shade.open" | "blinds.horizontal.open" | "blinds.vertical.open" | "curtains.open" | "window.shade.open" => "roller-shade",
+        "roller.shade.closed" | "blinds.horizontal.closed" | "blinds.vertical.closed" | "curtains.closed" | "window.shade.closed" => "roller-shade-closed",
+        "robotic.vacuum" => "robot-vacuum",
+        "printer" | "printer.dotmatrix" => "printer",
+        "snowflake" => "snowflake",
+        "flame" => "fire",
+        "humidity" | "drop.degreesign" | "humidifier" | "dehumidifier" => "water-percent",
+        "drop" | "drop.circle" | "drop.triangle" => "water",
+        "thermometer" | "thermometer.medium" | "thermometer.low" | "thermometer.high" | "thermometer.sun" | "thermometer.snowflake" => "thermometer",
+        "house" | "homekit" | "house.circle" => "home",
+        "tv" | "tv.inset" | "appletv" | "play.tv" => "television",
+        "lamp.desk" => "desk-lamp",
+        "lamp.floor" => "floor-lamp",
+        "lamp.table" | "lamp.ceiling" => "lamp",
+        "washer" => "washing-machine",
+        "dishwasher" => "dishwasher",
+        "refrigerator" => "fridge",
+        "speaker" | "hifispeaker" | "homepod" | "speaker.wave.2" => "speaker",
+        "sofa" | "chair.lounge" => "sofa",
+        "bed.double" | "bed.single" => "bed",
+        "air.conditioner.horizontal" | "air.conditioner.vertical" | "air.purifier" => "air-conditioner",
+        "heater.vertical" | "fireplace" | "heat.waves" => "radiator",
+        "door.garage.closed" | "door.garage.open" | "car.garage" => "garage",
+        "lock" | "lock.open" | "lock.shield" => "lock",
+        "door.left.hand.closed" | "door.left.hand.open" | "door.right.hand.closed" | "door.right.hand.open" | "door.french.closed" | "door.french.open" => "door",
+        "play" | "play.circle" => "play",
+        "hourglass" => "timer-sand",
+        _ => return None,
+    })
+}
+
+/// What a tile shows as its icon.
+#[derive(Clone, Debug, PartialEq)]
+enum Look {
+    /// A glyph of Segoe Fluent Icons.
+    Glyph(String),
+    /// An icon of `home_icons.txt`, by name.
+    Icon(&'static str),
+}
+
+impl Look {
+    /// Drawn in `r`, in `color`.
+    fn draw(&self, scene: &mut Scene, r: Rect, color: Rgba) {
+        match self {
+            Look::Glyph(g) => scene.text(r, g.as_str(), Font::icons(r.h - 4.0), color, Align::Start),
+            Look::Icon(name) => {
+                if let Some(o) = icon(name) {
+                    scene.outline(r, o, color);
+                }
+            }
+        }
+    }
+}
 
 /// Home Assistant's blue.
 const BRAND: Rgba = Rgba(0x18 as f32 / 255.0, 0xbc as f32 / 255.0, 0xf2 as f32 / 255.0, 1.0);
@@ -68,7 +155,9 @@ const WIDE: f32 = TILE * 2.0 + GAP;
 const WIDTH: f32 = WIDE + 2.0 * MARGIN;
 const PAD: f32 = 10.0;
 const TILE_H: f32 = 78.0;
-const SLIDER_H: f32 = 26.0;
+const SLIDER_H: f32 = 22.0;
+/// A climate's mode as an icon to click, as on macOS.
+const MODE_W: f32 = 30.0;
 const TOP_H: f32 = 52.0;
 const LINE_H: f32 = 24.0;
 const CHIP_H: f32 = 28.0;
@@ -95,8 +184,8 @@ impl Entity {
     }
 }
 
-/// An entity of a group: its id, or a table with a name and an icon of its own (a glyph of Segoe
-/// Fluent Icons, as the character or its code: `"E7F4"`).
+/// An entity of a group: its id, or a table with a name and an icon of its own (see `named`, or a
+/// glyph of Segoe Fluent Icons, as the character or its code: `"E7F4"`).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 enum TileDef {
@@ -124,13 +213,16 @@ impl TileDef {
         }
     }
 
-    fn icon(&self) -> Option<String> {
+    fn icon(&self) -> Option<Look> {
         let TileDef::Full { icon: Some(icon), .. } = self else { return None };
+        if let Some(name) = named(icon) {
+            return Some(Look::Icon(name));
+        }
         let code = icon.trim_start_matches("\\u").trim_start_matches("U+");
         match u32::from_str_radix(code, 16).ok().and_then(char::from_u32) {
-            Some(c) if code.len() == 4 => Some(c.to_string()),
-            // A glyph itself; a name (of macOS' symbols, say) means nothing here
-            _ => (icon.chars().count() <= 2).then(|| icon.clone()),
+            Some(c) if code.len() == 4 => Some(Look::Glyph(c.to_string())),
+            // A glyph itself; a name nothing here knows means nothing
+            _ => (icon.chars().count() <= 2).then(|| Look::Glyph(icon.clone())),
         }
     }
 }
@@ -186,19 +278,54 @@ fn degrees(v: f64) -> String {
     format!("{}°", crate::i18n::number(r, if r.fract() == 0.0 { 0 } else { 1 }))
 }
 
-/// A climate mode: its color (by palette name) and name.
-fn mode_look(mode: &str) -> (&'static str, String) {
-    let (color, name) = match mode {
-        "off" => ("subtext0", t("Spento", "Off")),
-        "heat" => ("peach", t("Caldo", "Heat")),
-        "cool" => ("sky", t("Freddo", "Cool")),
-        "dry" => ("teal", t("Deumidifica", "Dry")),
-        "fan_only" => ("teal", t("Ventola", "Fan")),
-        "heat_cool" => ("text", t("Caldo/freddo", "Heat/Cool")),
-        "auto" => ("text", t("Automatico", "Auto")),
-        other => return ("text", other.to_string()),
+/// A climate mode: its icon, color (by palette name) and name, as the macOS RustyBar has them.
+fn mode_look(mode: &str) -> (&'static str, &'static str, String) {
+    let (icon, color, name) = match mode {
+        "off" => ("thermometer", "subtext0", t("Spento", "Off")),
+        "heat" => ("fire", "peach", t("Caldo", "Heat")),
+        "cool" => ("snowflake", "sky", t("Freddo", "Cool")),
+        "dry" => ("water-percent", "teal", t("Deumidifica", "Dry")),
+        "fan_only" => ("fan", "teal", t("Ventola", "Fan")),
+        "heat_cool" => ("thermometer", "text", t("Caldo/freddo", "Heat/Cool")),
+        "auto" => ("alpha-a-circle-outline", "text", t("Automatico", "Auto")),
+        other => return ("thermometer", "text", other.to_string()),
     };
-    (color, name.to_string())
+    (icon, color, name.to_string())
+}
+
+/// A tile's background: lighter, with a hint of the state's color, while it's on (as on macOS).
+fn tile_color(theme: &Theme, color: Rgba, lit: bool) -> Rgba {
+    if lit { theme.text.mix(color, 0.25).alpha(0.11) } else { theme.tile(color, false) }
+}
+
+/// A slider as the macOS RustyBar's: a rounded bar filled up to the value, with the percentage
+/// on the fill, or just after it when the fill is too short.
+fn level_slider(scene: &mut Scene, theme: &Theme, fonts: &Fonts, r: Rect, value: f32) {
+    let v = value.clamp(0.0, 1.0);
+    // The track darker than the tile, as on macOS
+    scene.fill(r, r.h / 2.0, theme.color("crust").unwrap_or(theme.surface).alpha(0.7));
+    let edge = if v > 0.0 { (r.w * v).max(r.h) } else { 0.0 };
+    if edge > 0.0 {
+        scene.fill(Rect::new(r.x, r.y, edge, r.h), r.h / 2.0, theme.primary);
+    }
+    let text = format!("{:.0}%", v * 100.0);
+    let font = Font::new(theme.small_size, Weight::SemiBold);
+    let tw = fonts.width(&text, font).ceil();
+    let (inset, gap) = (8.0, 6.0);
+    let (x, on_fill) = if edge - inset - tw >= inset {
+        (edge - inset - tw, true)
+    } else if (edge + gap).max(inset) + tw <= r.w - inset {
+        ((edge + gap).max(inset), false)
+    } else {
+        ((r.w - tw) / 2.0, edge > r.w / 2.0)
+    };
+    scene.text(Rect::new(r.x + x, r.y, tw + 2.0, r.h), text, font, if on_fill { theme.on_primary } else { theme.text }, Align::Start);
+}
+
+/// Where the server's logo is kept: `%LOCALAPPDATA%\rustybar\home-assistant-logo.svg`, by the log.
+fn logo_path() -> std::path::PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    base.join("rustybar").join("home-assistant-logo.svg")
 }
 
 /// `1 h 20 min`, `45 min`.
@@ -246,6 +373,11 @@ pub struct Home {
     nudge: Option<(String, f64, Instant)>,
     /// The slider being dragged in the popup, and where.
     drag: Option<(String, f32)>,
+    /// Home Assistant's logo as its server has it, for the pill (see `fetch_logo`).
+    logo: Option<Arc<Outline>>,
+    logo_asked: bool,
+    /// The logo's document, from the worker thread that fetched it.
+    logo_svg: Arc<Mutex<Option<String>>>,
     timer: Timer,
     shown: bool,
     mock: bool,
@@ -274,6 +406,9 @@ impl Home {
             pending_mode: HashMap::new(),
             nudge: None,
             drag: None,
+            logo: None,
+            logo_asked: false,
+            logo_svg: Arc::new(Mutex::new(None)),
             timer: Timer::new(),
             shown: true,
             mock: false,
@@ -293,9 +428,44 @@ impl Home {
         w.setup = setup;
         w.publish(&w.states.keys().cloned().collect::<Vec<_>>(), false);
         if !w.mock && w.configured() {
+            w.logo = std::fs::read_to_string(logo_path()).ok().and_then(|s| Outline::from_svg(&s)).map(Arc::new);
             w.connect();
         }
         w
+    }
+
+    /// Home Assistant's logo, the mask icon its server has for browsers, once: saved next to the
+    /// log so the bar has it at once from then on (a trademark: it isn't in the repo, as on macOS).
+    fn fetch_logo(&mut self) {
+        if self.logo.is_some() || self.logo_asked || self.mock {
+            return;
+        }
+        self.logo_asked = true;
+        let url = format!("{}/static/icons/mask-icon.svg", self.base());
+        let (out, wake) = (self.logo_svg.clone(), self.wake.clone());
+        std::thread::spawn(move || {
+            let Ok(r) = net::request("GET", &url, &[], None, 10_000) else { return };
+            let svg = String::from_utf8_lossy(&r.body).into_owned();
+            if r.status != 200 || Outline::from_svg(&svg).is_none() {
+                return;
+            }
+            let path = logo_path();
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&path, &svg);
+            if let Ok(mut o) = out.lock() {
+                *o = Some(svg);
+            }
+            wake.set();
+        });
+    }
+
+    /// The logo the worker thread fetched. True if the pill changes.
+    fn take_logo(&mut self) -> bool {
+        let Some(svg) = self.logo_svg.lock().ok().and_then(|mut o| o.take()) else { return false };
+        self.logo = Outline::from_svg(&svg).map(Arc::new);
+        self.logo.is_some()
     }
 
     fn configured(&self) -> bool {
@@ -415,6 +585,7 @@ impl Home {
                     self.next_id = 1;
                     let ids = Json::Array(self.entities().iter().map(|id| id.as_str().into()).collect());
                     self.send(Json::of([("type", "subscribe_entities".into()), ("entity_ids", ids)]));
+                    self.fetch_logo();
                 }
                 // A wrong token: tried again on wake, or when the popup opens, read again
                 Some("auth_invalid") => {
@@ -720,20 +891,25 @@ impl Home {
     // ---- drawing -----------------------------------------------------------------------------
 
     /// A tile of a light, switch, cover or vacuum, at `x`, `y`, `h` tall.
-    fn tile(&self, scene: &mut Scene, theme: &Theme, def: &TileDef, x: f32, y: f32, h: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn tile(&self, scene: &mut Scene, theme: &Theme, fonts: &Fonts, def: &TileDef, x: f32, y: f32, h: f32) {
         let id = def.id();
         let e = self.states.get(id);
         let state = e.map(|e| e.state.as_str()).unwrap_or("unavailable");
         let on = state == "on";
         let c = |name: &str| theme.color(name).unwrap_or(theme.text);
-        let (masculine, mut icon) = match domain(id) {
-            "light" => (false, BULB.to_string()),
-            "fan" | "input_boolean" | "vacuum" => (true, if domain(id) == "vacuum" { ROBOT } else { POWER }.to_string()),
-            "cover" => (false, if state == "closed" { CLOSED } else { OPEN }.to_string()),
-            _ => (false, POWER.to_string()),
+        let (masculine, default) = match domain(id) {
+            "light" => (false, "lightbulb"),
+            "fan" => (true, "fan"),
+            "input_boolean" => (true, "power"),
+            "vacuum" => (true, "robot-vacuum"),
+            "cover" => (false, if state == "closed" { "roller-shade-closed" } else { "roller-shade" }),
+            _ => (false, "power-plug"),
         };
-        if let Some(i) = def.icon() {
-            icon = i;
+        let mut look = def.icon().unwrap_or(Look::Icon(default));
+        // A bulb is lit only when on
+        if look == Look::Icon("lightbulb") && !on {
+            look = Look::Icon("lightbulb-outline");
         }
         let (on_text, off_text) = if masculine { (t("Acceso", "On"), t("Spento", "Off")) } else { (t("Accesa", "On"), t("Spenta", "Off")) };
         let dimmable = e.is_some_and(|e| e.attributes.get("supported_color_modes").is_some_and(|m| m.array().iter().any(|m| m.str() != Some("onoff"))));
@@ -770,27 +946,27 @@ impl Home {
             _ => (color, text, text_color, lit),
         };
         let r = Rect::new(x, y, TILE, h);
-        scene.fill(r, theme.row_radius.max(8.0), theme.tile(color, lit));
+        scene.fill(r, theme.row_radius.max(8.0), tile_color(theme, color, lit));
         if !unavailable {
             scene.zone(r, theme.row_radius.max(8.0), format!("tap:{id}"));
         }
         let inner = TILE - 2.0 * PAD;
-        scene.text(Rect::new(x + PAD, y + PAD, 22.0, 22.0), icon, Font::icons(18.0), color, Align::Start);
+        look.draw(scene, Rect::new(x + PAD - 1.0, y + PAD, 22.0, 22.0), color);
         let name = self.entity_name(def);
         scene.text(Rect::new(x + PAD, y + 34.0, inner, 18.0), name, Font::new(theme.font_size, Weight::SemiBold), if unavailable { theme.overlay } else { theme.text }, Align::Start);
         scene.text(Rect::new(x + PAD, y + 52.0, inner, 16.0), text, Font::new(theme.small_size, Weight::Medium), text_color, Align::Start);
         if let Some(v) = slider.filter(|_| !unavailable) {
             let v = self.drag.as_ref().filter(|(d, _)| d == id).map_or(v as f32, |(_, f)| *f);
-            let track = Rect::new(x + PAD + 4.0, y + TILE_H - 4.0, inner - 8.0, 22.0);
-            super::audio::slider(scene, theme, track, v, !lit || on || domain(id) == "cover");
-            scene.slider(Rect::new(track.x - 8.0, track.y, track.w + 16.0, track.h), format!("slider:{id}"));
+            let bar = Rect::new(x + PAD, y + TILE_H - 6.0, inner, 18.0);
+            level_slider(scene, theme, fonts, bar, v);
+            scene.slider(bar, format!("slider:{id}"));
         }
     }
 
     /// The top of a wide tile: the icon, the name and the state, and something on the right.
     #[allow(clippy::too_many_arguments)]
-    fn wide_top(&self, scene: &mut Scene, theme: &Theme, x: f32, y: f32, icon: &str, color: Rgba, name: String, state: (&str, Rgba), right: (String, Rgba), unavailable: bool) {
-        scene.text(Rect::new(x + PAD, y + PAD + 4.0, 22.0, 22.0), icon, Font::icons(18.0), color, Align::Start);
+    fn wide_top(&self, scene: &mut Scene, theme: &Theme, x: f32, y: f32, icon: &'static str, color: Rgba, name: String, state: (&str, Rgba), right: (String, Rgba), unavailable: bool) {
+        Look::Icon(icon).draw(scene, Rect::new(x + PAD - 1.0, y + PAD + 3.0, 22.0, 22.0), color);
         let w = WIDE - 2.0 * PAD - 32.0 - 90.0;
         scene.text(Rect::new(x + PAD + 32.0, y + 8.0, w, 18.0), name, Font::new(theme.font_size, Weight::SemiBold), if unavailable { theme.overlay } else { theme.text }, Align::Start);
         scene.text(Rect::new(x + PAD + 32.0, y + 26.0, w, 16.0), state.0, Font::new(theme.small_size, Weight::Medium), state.1, Align::Start);
@@ -798,35 +974,26 @@ impl Home {
     }
 
     /// A climate, two tiles wide; its height.
-    fn climate(&self, scene: Option<&mut Scene>, theme: &Theme, fonts: &Fonts, def: &TileDef, x: f32, y: f32) -> f32 {
+    fn climate(&self, scene: Option<&mut Scene>, theme: &Theme, def: &TileDef, x: f32, y: f32) -> f32 {
         let id = def.id();
         let e = self.states.get(id);
         let state = e.map(|e| e.state.clone()).unwrap_or_else(|| "unavailable".into());
         let mode = self.pending_mode.get(id).cloned().unwrap_or_else(|| state.clone());
         let unavailable = state == "unavailable" || !self.is_online();
         let on = !unavailable && mode != "off";
-        // The modes as chips, in lines; −, the target and + at the end of the first
+        // The modes as icons in a row, then −, the target and + at its end; on a line of their
+        // own when the row has no room for them
         let modes: Vec<String> = e.map(|e| e.attributes.get("hvac_modes").map(|m| m.array().iter().filter_map(Json::str).filter(|m| *m != "off").map(String::from).collect()).unwrap_or_default()).unwrap_or_default();
-        let chip_font = Font::new(theme.small_size, Weight::SemiBold);
-        let controls = 26.0 + 46.0 + 26.0 + 8.0;
-        let mut chips: Vec<(Rect, String)> = Vec::new();
-        let (mut cx, mut line) = (x + PAD, 0usize);
-        for m in modes.iter().take(6) {
-            let w = fonts.width(&mode_look(m).1, chip_font).ceil() + 16.0;
-            let room = if line == 0 { WIDE - 2.0 * PAD - controls } else { WIDE - 2.0 * PAD };
-            if cx + w > x + PAD + room && cx > x + PAD {
-                line += 1;
-                cx = x + PAD;
-            }
-            chips.push((Rect::new(cx, y + TOP_H + line as f32 * (LINE_H + 4.0), w, LINE_H), m.clone()));
-            cx += w + 4.0;
-        }
-        let height = if on { TOP_H + (line + 1) as f32 * (LINE_H + 4.0) - 4.0 + PAD } else { TOP_H };
+        let modes = &modes[..modes.len().min(8)];
+        let controls = 26.0 + 4.0 + 46.0 + 4.0 + 26.0;
+        let row = modes.len() as f32 * (MODE_W + 4.0);
+        let lines = if row + 8.0 + controls > WIDE - 2.0 * PAD { 2.0 } else { 1.0 };
+        let height = if on { TOP_H + lines * (LINE_H + 4.0) - 4.0 + PAD } else { TOP_H };
         let Some(scene) = scene else { return height };
-        let (color_name, mode_name) = mode_look(&mode);
+        let (mode_icon, color_name, mode_name) = mode_look(&mode);
         let color = if unavailable { theme.overlay } else { theme.color(color_name).unwrap_or(theme.text) };
         let r = Rect::new(x, y, WIDE, height);
-        scene.fill(r, theme.row_radius.max(8.0), theme.tile(color, on));
+        scene.fill(r, theme.row_radius.max(8.0), tile_color(theme, color, on));
         if !unavailable {
             scene.zone(r, theme.row_radius.max(8.0), format!("tap:{id}"));
         }
@@ -837,20 +1004,21 @@ impl Home {
             _ => (mode_name.as_str(), theme.text),
         };
         let current = e.and_then(|e| e.num("current_temperature")).map(degrees).unwrap_or_default();
-        self.wide_top(scene, theme, x, y, THERMOMETER, color, self.entity_name(def), state_text, (current, if on { theme.text } else { theme.subtext }), unavailable);
+        self.wide_top(scene, theme, x, y, mode_icon, color, self.entity_name(def), state_text, (current, if on { theme.text } else { theme.subtext }), unavailable);
         if !on {
             return height;
         }
         let chip_bg = theme.surface.alpha(0.7);
-        for (r, m) in chips {
-            let (c, name) = mode_look(&m);
+        for (i, m) in modes.iter().enumerate() {
+            let r = Rect::new(x + PAD + i as f32 * (MODE_W + 4.0), y + TOP_H, MODE_W, LINE_H);
+            let (icon, c, _) = mode_look(m);
             let c = theme.color(c).unwrap_or(theme.text);
-            let selected = m == mode;
+            let selected = *m == mode;
             scene.fill(r, 6.0, if selected { c.alpha(0.22) } else { chip_bg });
-            scene.text(r, name, chip_font, if selected { c } else { theme.subtext }, Align::Center);
+            Look::Icon(icon).draw(scene, Rect::new(r.x + (r.w - 15.0) / 2.0, r.y + (r.h - 15.0) / 2.0, 15.0, 15.0), if selected { c } else { theme.subtext });
             scene.zone(r, 6.0, format!("mode:{id}:{m}"));
         }
-        let by = y + TOP_H;
+        let by = y + TOP_H + (lines - 1.0) * (LINE_H + 4.0);
         let plus = Rect::new(x + WIDE - PAD - 26.0, by, 26.0, LINE_H);
         let target = Rect::new(plus.x - 46.0, by, 46.0, LINE_H);
         let minus = Rect::new(target.x - 26.0, by, 26.0, LINE_H);
@@ -886,13 +1054,13 @@ impl Home {
             _ => (t("Spenta", "Off"), theme.subtext),
         };
         let r = Rect::new(x, y, WIDE, height);
-        scene.fill(r, theme.row_radius.max(8.0), theme.tile(color, on && !unavailable));
+        scene.fill(r, theme.row_radius.max(8.0), tile_color(theme, color, on && !unavailable));
         if !unavailable {
             scene.zone(r, theme.row_radius.max(8.0), format!("tap:{id}"));
         }
         let paused = printing == Some("pause");
         let percent = printing.map(|_| (format!("{progress:.0}%"), if paused { c("yellow") } else { theme.text })).unwrap_or((String::new(), theme.text));
-        self.wide_top(scene, theme, x, y, PRINTER, color, self.entity_name(def), state_text, percent, unavailable);
+        self.wide_top(scene, theme, x, y, "printer", color, self.entity_name(def), state_text, percent, unavailable);
         if let Some(status) = printing {
             let bar = Rect::new(x + PAD, y + TOP_H, WIDE - 2.0 * PAD, 6.0);
             scene.fill(bar, 3.0, theme.surface);
@@ -914,13 +1082,13 @@ impl Home {
         let unavailable = e.is_none_or(|e| e.state == "unavailable") || !self.is_online();
         let running = e.is_some_and(|e| e.state == "on") || self.note(id) == Some(Note::Running);
         let (icon, color) = match self.note(id) {
-            _ if unavailable => (PLAY, theme.overlay),
-            Some(Note::Failed) => (FAILED, theme.color("red").unwrap_or(theme.text)),
-            _ if running => (RUNNING, theme.color("yellow").unwrap_or(theme.text)),
-            _ => (PLAY, theme.primary),
+            _ if unavailable => ("play", theme.overlay),
+            Some(Note::Failed) => ("alert-circle", theme.color("red").unwrap_or(theme.text)),
+            _ if running => ("timer-sand", theme.color("yellow").unwrap_or(theme.text)),
+            _ => ("play", theme.primary),
         };
         scene.fill(r, CHIP_H / 2.0, theme.surface.alpha(0.7));
-        scene.text(Rect::new(r.x + 10.0, r.y, 14.0, r.h), icon, Font::icons(11.0), color, Align::Center);
+        Look::Icon(icon).draw(scene, Rect::new(r.x + 9.0, r.y + (r.h - 16.0) / 2.0, 16.0, 16.0), color);
         scene.text(Rect::new(r.x + 30.0, r.y, r.w - 40.0, r.h), self.entity_name(def), Font::new(theme.small_size + 1.0, Weight::SemiBold), if unavailable { theme.overlay } else { theme.text }, Align::Start);
         if !unavailable {
             scene.zone(r, CHIP_H / 2.0, format!("tap:{id}"));
@@ -955,7 +1123,7 @@ impl Home {
                         let h = pair.iter().map(|d| if self.has_slider(d.id()) { TILE_H + SLIDER_H } else { TILE_H }).fold(0.0, f32::max);
                         if let Some(s) = scene.as_deref_mut() {
                             for (i, d) in pair.iter().enumerate() {
-                                self.tile(s, theme, d, MARGIN + i as f32 * (TILE + GAP), *y, h);
+                                self.tile(s, theme, fonts, d, MARGIN + i as f32 * (TILE + GAP), *y, h);
                             }
                         }
                         *y += h + GAP;
@@ -967,7 +1135,7 @@ impl Home {
                             "script" | "scene" => chips.push(def),
                             "climate" => {
                                 flush(&mut pair, &mut scene, &mut y);
-                                y += self.climate(scene.as_deref_mut(), theme, fonts, def, MARGIN, y) + GAP;
+                                y += self.climate(scene.as_deref_mut(), theme, def, MARGIN, y) + GAP;
                             }
                             _ if id == self.setup.printer.plug => {
                                 flush(&mut pair, &mut scene, &mut y);
@@ -1026,36 +1194,47 @@ impl Home {
     }
 }
 
-impl super::Widget for Home {
-    fn pill(&self, theme: &Theme) -> Option<Pill> {
+impl Home {
+    /// The pill: the logo and the count, after the printer while it prints when `printer`.
+    fn pill_of(&self, theme: &Theme, printer: bool) -> Option<Pill> {
         if !self.configured() && !self.mock {
             return None;
         }
         let online = self.is_online();
         let mut items = Vec::new();
-        if let Some(status) = self.printing().filter(|_| online) {
+        if let Some(status) = self.printing().filter(|_| online && printer) {
             let color = if status == "pause" { theme.color("yellow").unwrap_or(theme.text) } else { theme.text };
             let (progress, _) = self.printer_progress();
-            items.push(Item::icon(PRINTER, color));
+            if let Some(o) = icon("printer") {
+                items.push(Item::outline(o, theme.font_size + 4.0, color));
+            }
             items.push(Item::text(format!("{progress:.0}%"), color));
         }
-        let house = Item::icon(HOUSE, if online { BRAND } else { theme.overlay });
-        items.push(if items.is_empty() { house } else { house.space(12.0) });
+        let start = items.len();
+        let color = if online { BRAND } else { theme.overlay };
+        let logo = match &self.logo {
+            Some(o) => Item::outline(o.clone(), theme.font_size + 2.0, color),
+            None => Item::icon(HOUSE, color),
+        };
+        // The printer and the house apart, with a line between, as two pills on macOS
+        items.push(if start > 0 { logo.space(2.0 * theme.pill_padding) } else { logo });
         let count = self.on_count();
         if online && count > 0 {
             items.push(Item::text(count.to_string(), theme.text));
         }
-        Some(Pill::new(items).gap(6.0))
+        let pill = Pill::new(items).gap(6.0);
+        Some(if start > 0 { pill.part(0, 0, theme.primary).part(start, 0, theme.primary) } else { pill })
+    }
+}
+
+impl super::Widget for Home {
+    fn pill(&self, theme: &Theme) -> Option<Pill> {
+        self.pill_of(theme, true)
     }
 
-    /// The house alone, without the printer.
+    /// The logo alone, without the printer.
     fn compact(&self, theme: &Theme) -> Option<Pill> {
-        let mut pill = self.pill(theme)?;
-        if self.printing().is_some() && self.is_online() {
-            pill.items.drain(..2);
-            pill.items[0].space = None;
-        }
-        Some(pill)
+        self.pill_of(theme, false)
     }
 
     fn handles(&self) -> Vec<HANDLE> {
@@ -1068,8 +1247,9 @@ impl super::Widget for Home {
         }
         let a = self.received();
         let b = self.take_results();
+        let c = self.take_logo();
         self.lua_calls();
-        a || b
+        a || b || c
     }
 
     fn event(&mut self, signal: &Signal) -> bool {
@@ -1274,12 +1454,80 @@ mod tests {
     fn words() {
         assert_eq!(span(45.0), "45 min");
         assert_eq!(span(80.0), "1 h 20 min");
-        let icon = TileDef::Full { id: "switch.tv".into(), name: None, icon: Some("E7F4".into()) };
-        assert_eq!(icon.icon().as_deref(), Some("\u{E7F4}"));
-        let named = TileDef::Full { id: "switch.tv".into(), name: None, icon: Some("lightbulb".into()) };
-        assert_eq!(named.icon(), None);
+        let tile = |icon: &str| TileDef::Full { id: "switch.tv".into(), name: None, icon: Some(icon.into()) };
+        assert_eq!(tile("E7F4").icon(), Some(Look::Glyph("\u{E7F4}".into())));
+        // As the macOS RustyBar's config names them, and as Home Assistant does
+        assert_eq!(tile("lightbulb").icon(), Some(Look::Icon("lightbulb")));
+        assert_eq!(tile("powerplug.fill").icon(), Some(Look::Icon("power-plug")));
+        assert_eq!(tile("mdi:fan").icon(), Some(Look::Icon("fan")));
+        assert_eq!(tile("lamp.desk").icon(), Some(Look::Icon("desk-lamp")));
+        assert_eq!(tile("cup.and.saucer").icon(), None);
         let setup: Setup = to_toml(&Json::parse(r#"{"groups": [{"title": "T", "entities": ["light.a", {"id": "switch.b", "name": "B"}]}]}"#).unwrap()).unwrap().try_into().unwrap();
         assert_eq!(setup.groups[0].entities.len(), 2);
         assert_eq!(setup.groups[0].entities[1].name(), Some("B"));
+    }
+
+    /// Every icon the widget draws, and every one a symbol of macOS names, is in the file.
+    #[test]
+    fn icons_are_there() {
+        let drawn = ["lightbulb", "lightbulb-outline", "fan", "power", "robot-vacuum", "roller-shade", "roller-shade-closed", "power-plug", "printer", "play", "alert-circle", "timer-sand"];
+        let modes = ["off", "heat", "cool", "dry", "fan_only", "heat_cool", "auto", "eco"].map(|m| mode_look(m).0);
+        for name in drawn.iter().chain(&modes) {
+            assert!(icon(name).is_some(), "{name}");
+        }
+        let symbols = [
+            "lightbulb.fill", "powerplug", "fan.fill", "togglepower", "roller.shade.open", "roller.shade.closed", "robotic.vacuum.fill", "printer.fill", "snowflake", "flame.fill", "humidity.fill",
+            "drop.fill", "thermometer.medium", "house.fill", "tv", "lamp.desk", "lamp.floor", "lamp.table", "washer", "dishwasher", "refrigerator", "speaker", "sofa", "bed.double", "air.conditioner.horizontal",
+            "heater.vertical", "door.garage.closed", "lock.fill", "door.left.hand.closed", "play.fill", "hourglass",
+        ];
+        for s in symbols {
+            let name = named(s).unwrap_or_else(|| panic!("{s}"));
+            assert!(icon(name).is_some(), "{s} → {name}");
+        }
+    }
+
+    /// The percentage on the fill, after it when the fill is short, in the middle when neither fits.
+    #[test]
+    fn level_slider_labels() {
+        let theme = Theme::from_config(&crate::config::Config::default().theme);
+        let fonts = Fonts::new(&theme).unwrap();
+        let label = |v: f32, w: f32| {
+            let mut s = Scene::new(200.0, 40.0);
+            level_slider(&mut s, &theme, &fonts, Rect::new(10.0, 0.0, w, 18.0), v);
+            s.shapes.iter().find_map(|sh| match sh {
+                crate::ui::Shape::Text { rect, text, color, .. } => Some((rect.x - 10.0, text.clone(), *color)),
+                _ => None,
+            }).unwrap()
+        };
+        let (x, text, color) = label(0.7, 130.0);
+        assert_eq!(text, "70%");
+        assert!(x < 0.7 * 130.0 && color == theme.on_primary);
+        let (x, text, color) = label(0.0, 130.0);
+        assert_eq!((x, text.as_str(), color), (8.0, "0%", theme.text));
+        let (x, _, color) = label(0.1, 130.0);
+        assert!(x >= 0.1 * 130.0 && color == theme.text);
+    }
+
+    /// While the printer prints: its part and the house's, with a line between; compact, the house.
+    #[test]
+    fn the_printer_in_its_own_part() {
+        use crate::widgets::Widget;
+        let theme = Theme::from_config(&crate::config::Config::default().theme);
+        let mut w = home();
+        w.setup.server = "http://ha.test:8123".into();
+        w.online = Some(true);
+        w.setup.printer = Printer { plug: "switch.p".into(), status: "sensor.s".into(), progress: "sensor.pr".into(), ..Printer::default() };
+        w.apply(&Json::parse(r#"{"a": {"switch.p": {"s": "on"}, "sensor.s": {"s": "running"}, "sensor.pr": {"s": "45"}, "light.a": {"s": "on"}}}"#).unwrap());
+        let pill = w.pill(&theme).unwrap();
+        assert!(pill.items[0].outline.is_some());
+        assert_eq!(pill.items[1].text, "45%");
+        assert_eq!(pill.parts.iter().map(|p| p.start).collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(pill.items[2].text, HOUSE);
+        assert_eq!(pill.items[3].text, "1");
+        let compact = w.compact(&theme).unwrap();
+        assert!(compact.parts.is_empty() && compact.items[0].text == HOUSE);
+        // With the server's logo, the logo in place of the house
+        w.logo = Outline::new("M0 0h24v24z", [0.0, 0.0, 24.0, 24.0]).map(Arc::new);
+        assert!(w.compact(&theme).unwrap().items[0].outline.is_some());
     }
 }
